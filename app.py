@@ -105,11 +105,17 @@ def request(
     return data, mime
 
 
-def multipart_audio(path: str, model: str) -> tuple[bytes, str]:
+def multipart_audio(path: str, model: str, language: str = "tr") -> tuple[bytes, str]:
     boundary = "lifeos" + uuid.uuid4().hex
     file = Path(path)
+    lang_part = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\n{language}\r\n'
+        if language
+        else ""
+    )
     raw = (
         f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n{model}\r\n'
+        f"{lang_part}"
         f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{file.name}"\r\n'
         f"Content-Type: application/octet-stream\r\n\r\n"
     ).encode() + file.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
@@ -509,8 +515,9 @@ class Bridge(QObject):
             asr_res = parse_response(asr_data, asr_mime, prompt_text="live_audio", task="automatic-speech-recognition", model_id=asr_model)
             self._record_usage_and_headers(asr_account, asr_model, asr_res.get("usage", {}), asr_headers)
             spoken_text = (asr_res.get("text") or "").strip()
-            if not spoken_text:
-                self._live_reply = "Ses algılanamadı, lütfen tekrar konuşun."
+            hallucinations = {"thank you.", "thank you", "thanks for watching.", "altyazı m.k.", "subtitles by", "you", "."}
+            if not spoken_text or spoken_text.lower().strip() in hallucinations:
+                self._live_reply = "Ses net algılanamadı, lütfen mikrofona konuşup tekrar gönderin."
                 self._live_state = "idle"
                 self.liveVoiceChanged.emit()
                 return
@@ -1329,13 +1336,38 @@ class Bridge(QObject):
         if custom_json.strip():
             payload = json.loads(custom_json)
         elif account["provider"] == "groq":
+            limits = get_groq_model_limits(model)
+            tpm_budget = limits.get("tpm") or 8000
+            rl = self._rate_limits.get(account["id"], {})
+            rem_tok = int(rl.get("remaining_tokens", tpm_budget) or tpm_budget)
+            effective_tpm = max(2500, min(tpm_budget, rem_tok if rem_tok > 1200 else tpm_budget))
+            # Fit input document + history + max_tokens safely within Groq's per-minute TPM cap
+            has_large_doc = bool(attachment and attachment.get("kind") == "document" and len(attachment.get("text") or "") > 6000)
+            req_max_tok = min(max_tok, 2048 if (has_large_doc and effective_tpm <= 10000) else max_tok)
+            input_tok_budget = max(1800, effective_tpm - min(req_max_tok, 1800) - 400)
+            doc_char_budget = max(4500, int(input_tok_budget * 2.5))
+            hist_char_budget = max(1500, int(input_tok_budget * 0.7))
             payload = conversation_payload(
-                history, prompt, attachment, max_tokens=max_tok, temperature=temp, system_prompt=sys_prompt
+                history,
+                prompt,
+                attachment,
+                max_tokens=req_max_tok,
+                temperature=temp,
+                system_prompt=sys_prompt,
+                max_doc_chars=doc_char_budget,
+                max_history_chars=hist_char_budget,
             )
             payload["model"] = model
         elif task in CHAT_TASKS:
             payload = conversation_payload(
-                history, prompt, attachment, max_tokens=max_tok, temperature=temp, system_prompt=sys_prompt
+                history,
+                prompt,
+                attachment,
+                max_tokens=max_tok,
+                temperature=temp,
+                system_prompt=sys_prompt,
+                max_doc_chars=32000,
+                max_history_chars=12000,
             )
             if task == "image-to-text" and attachment and attachment["kind"] == "image":
                 payload = {
@@ -1374,7 +1406,61 @@ class Bridge(QObject):
                 if account["provider"] == "groq"
                 else f"{API}/accounts/{account['accountId']}/ai/run/{model}"
             )
-            data, mime, resp_headers = request_with_headers(url, token, payload)
+            try:
+                data, mime, resp_headers = request_with_headers(url, token, payload)
+            except ValueError as err:
+                err_str = str(err)
+                if account["provider"] == "groq" and ("HTTP 413" in err_str or "HTTP 429" in err_str or "too large" in err_str.lower()):
+                    # Automatic fallback 1: Compact document & history tightly so it fits even a partially-used 6k/8k TPM window
+                    compact_payload = conversation_payload(
+                        history[-4:],
+                        prompt,
+                        attachment,
+                        max_tokens=1536,
+                        temperature=temp,
+                        system_prompt=sys_prompt,
+                        max_doc_chars=7500,
+                        max_history_chars=1500,
+                    )
+                    compact_payload["model"] = model
+                    try:
+                        data, mime, resp_headers = request_with_headers(url, token, compact_payload)
+                    except ValueError:
+                        # Automatic fallback 2: Switch to a Cloudflare account if registered (no 8k TPM burst cap), or ultra-compact on Groq
+                        cf_acc = next((a for a in self._accounts if a["provider"] == "cloudflare"), None)
+                        if cf_acc:
+                            cf_tok = self._token(cf_acc["id"])
+                            cf_models = self._fetch_models_for_account(cf_acc)
+                            cf_model_id, _ = select_best_model(cf_models, prompt, attachment)
+                            cf_payload = conversation_payload(
+                                history[-6:],
+                                prompt,
+                                attachment,
+                                max_tokens=2048,
+                                temperature=temp,
+                                system_prompt=sys_prompt,
+                                max_doc_chars=24000,
+                                max_history_chars=6000,
+                            )
+                            cf_url = f"{API}/accounts/{cf_acc['accountId']}/ai/run/{cf_model_id}"
+                            data, mime, resp_headers = request_with_headers(cf_url, cf_tok, cf_payload)
+                            account = cf_acc
+                            model = cf_model_id
+                        else:
+                            ultra_payload = conversation_payload(
+                                [],
+                                prompt,
+                                attachment,
+                                max_tokens=1024,
+                                temperature=temp,
+                                system_prompt=sys_prompt,
+                                max_doc_chars=4500,
+                                max_history_chars=0,
+                            )
+                            ultra_payload["model"] = model
+                            data, mime, resp_headers = request_with_headers(url, token, ultra_payload)
+                else:
+                    raise
 
         prompt_est_str = prompt + (attachment.get("text", "") if attachment else "")
         if mime == "application/octet-stream" and task in {"text-to-image", "text-to-speech"}:

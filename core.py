@@ -547,6 +547,58 @@ def extract_document(path: str, limit: int = 80000) -> str:
     return extract_document_full(path, limit=limit).text
 
 
+def smart_compress_document(text: str, max_chars: int = 15000, query: str = "") -> str:
+    """Preserves Head (Künye/Dava/İddia), Middle (Gerekçe/Deliller/Query matches), and Tail (Hüküm/Sonuç) of large legal/office documents so they fit within strict per-minute token (TPM) budgets without losing the verdict."""
+    cleaned = (text or "").strip()
+    if len(cleaned) <= max_chars or max_chars <= 0:
+        return cleaned
+
+    head_budget = int(max_chars * 0.42)
+    mid_budget = int(max_chars * 0.23)
+    tail_budget = max_chars - head_budget - mid_budget
+
+    head_part = cleaned[:head_budget].rstrip()
+    tail_part = cleaned[-tail_budget:].lstrip()
+    middle_pool = cleaned[head_budget : len(cleaned) - tail_budget]
+
+    # Pick high-value middle paragraphs (matching query keywords or legal reasoning headings)
+    q_words = [w.lower() for w in re.findall(r"\w{3,}", query or "") if w.lower() not in {"inceler", "misin", "özetle", "nedir", "bu", "belgeyi", "dosyayı"}]
+    legal_anchors = ("gerekçe", "delil", "bilirkişi", "tespit", "değerlendirme", "hüküm", "sonuç", "kanaat", "madde", "fıkra", "itiraz", "tazminat", "alacak")
+
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}|\n(?=[A-ZÇĞİÖŞÜ0-9]{2,})", middle_pool) if p.strip()]
+    scored_paras: list[tuple[int, int, str]] = []
+    for idx, p in enumerate(paragraphs):
+        p_low = p.lower()
+        score = sum(3 for w in q_words if w in p_low) + sum(2 for a in legal_anchors if a in p_low)
+        scored_paras.append((score, idx, p))
+
+    scored_paras.sort(key=lambda x: (-x[0], x[1]))
+    chosen_mid: list[tuple[int, str]] = []
+    used_mid = 0
+    for score, idx, p in scored_paras:
+        if used_mid + len(p) + 2 > mid_budget:
+            if used_mid == 0:
+                chosen_mid.append((idx, p[:mid_budget]))
+                used_mid += mid_budget
+            continue
+        chosen_mid.append((idx, p))
+        used_mid += len(p) + 2
+        if used_mid >= mid_budget * 0.9:
+            break
+
+    chosen_mid.sort(key=lambda x: x[0])
+    mid_part = "\n\n".join(p for _, p in chosen_mid) if chosen_mid else middle_pool[:mid_budget]
+
+    return (
+        f"{head_part}\n\n"
+        f"[... Belge Akıllı Sıkıştırma ({len(cleaned):,} karakter → {max_chars:,} karakter): "
+        f"Başlık/İddia, Gerekçe Özetleri ve Hüküm/Sonuç korundu ...]\n\n"
+        f"{mid_part}\n\n"
+        f"[... Belgenin Son Bölümü / Hüküm & Sonuç ...]\n\n"
+        f"{tail_part}"
+    )
+
+
 def file_data(path: str) -> tuple[str, str]:
     file = Path(path)
     mime = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
@@ -561,8 +613,10 @@ def conversation_payload(
     max_tokens: int = 4096,
     temperature: float = 0.6,
     system_prompt: str = "",
+    max_doc_chars: int = 24000,
+    max_history_chars: int = 10000,
 ) -> dict:
-    """Builds the chat completion payload without polluting UI bubbles with raw document text."""
+    """Builds the chat completion payload without polluting UI bubbles with raw document text, and fits within model token budgets."""
     history: list[dict] = []
     default_sys = (
         system_prompt.strip()
@@ -577,14 +631,24 @@ def conversation_payload(
     )
     history.append({"role": "system", "content": default_sys})
 
-    for m in messages[-24:]:
+    recent_msgs: list[dict] = []
+    used_hist_chars = 0
+    per_old_doc_limit = max(2000, max_history_chars // 2)
+    for m in reversed(messages[-16:]):
         if m.get("role") not in {"user", "assistant"}:
             continue
         content = m.get("content") or ""
         att_text = m.get("attachment_text") or ""
         att_name = m.get("attachment") or ""
         if att_text and m.get("role") == "user" and f"[Ek belge: {att_name}]" not in content:
-            content = f"{content}\n\n[Ek belge: {att_name}]\n{att_text}".strip()
+            compressed_old_doc = smart_compress_document(att_text, max_chars=per_old_doc_limit, query=prompt)
+            content = f"{content}\n\n[Ek belge: {att_name}]\n{compressed_old_doc}".strip()
+        elif len(content) > per_old_doc_limit:
+            content = smart_compress_document(content, max_chars=per_old_doc_limit, query=prompt)
+
+        if used_hist_chars + len(content) > max_history_chars and recent_msgs:
+            break
+        used_hist_chars += len(content)
 
         media_val = m.get("media") or ""
         media_local = media_val.replace("file://", "") if media_val.startswith("file://") else media_val
@@ -595,7 +659,9 @@ def conversation_payload(
                 {"type": "image_url", "image_url": {"url": f"data:{old_mime};base64,{old_data}"}},
             ]
         if content:
-            history.append({"role": m["role"], "content": content})
+            recent_msgs.append({"role": m["role"], "content": content})
+
+    history.extend(reversed(recent_msgs))
 
     user_content: str | list = prompt.strip()
     if attachment:
@@ -603,7 +669,8 @@ def conversation_payload(
         if kind == "document":
             rendered_pages = attachment.get("rendered_pages") or []
             doc_header = f"[Ek Belge: {attachment['name']} ({attachment.get('badge', 'Belge')})]"
-            full_prompt = f"{user_content or 'Bu belgeyi incele ve özetle.'}\n\n{doc_header}\n{attachment['text']}"
+            fitted_doc_text = smart_compress_document(attachment.get("text") or "", max_chars=max_doc_chars, query=prompt)
+            full_prompt = f"{user_content or 'Bu belgeyi incele ve özetle.'}\n\n{doc_header}\n{fitted_doc_text}"
             if rendered_pages:
                 user_content = [{"type": "text", "text": full_prompt}] + [
                     {"type": "image_url", "image_url": {"url": page_url}} for page_url in rendered_pages[:3]

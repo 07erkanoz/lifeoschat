@@ -18,6 +18,7 @@ from core import (
     parse_response,
     render_message_html,
     select_best_model,
+    smart_compress_document,
     split_thinking,
 )
 from documents import (
@@ -269,6 +270,20 @@ class CoreAndDocumentTests(unittest.TestCase):
         self.assertIn("document", kinds)
         code_art = next(a for a in artifacts if a["kind"] == "code")
         self.assertEqual(code_art["title"], "hesapla.py")
+
+        # Verify large legal UDF document smart compression preserves both Head (Esas/Karar) and Tail (HÜKÜM)
+        huge_decision = (
+            "T.C. ANKARA 4. ASLİYE TİCARET MAHKEMESİ\nESAS NO: 2025/104\nKARAR NO: 2026/88\n"
+            + ("Duruşma tutanakları ve ara kararlar detayı. " * 700)
+            + "\n\nGEREKÇE:\nBilirkişi kök ve ek raporları incelenmiş, davacının alacağı tespit edilmiştir.\n\n"
+            + ("Sözleşme hükümleri ve ticari defter kayıtları incelemesi. " * 400)
+            + "\n\nHÜKÜM:\n1- Davanın KABULÜNE, 450.000,00 TL alacağın davalıdan tahsiline karar verildi."
+        )
+        compressed = smart_compress_document(huge_decision, max_chars=12000, query="inceler misin")
+        self.assertLessEqual(len(compressed), 13000)
+        self.assertIn("ESAS NO: 2025/104", compressed)
+        self.assertIn("Bilirkişi kök ve ek raporları", compressed)
+        self.assertIn("Davanın KABULÜNE, 450.000,00 TL", compressed)
 
 
 if __name__ == "__main__":
