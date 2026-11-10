@@ -1163,6 +1163,13 @@ class Bridge(QObject):
             return
         self._active_account = account_id
         self.settings.setValue("activeAccount", account_id)
+        if self._chat:
+            self.db.execute(
+                "UPDATE chats SET account=?, model=?, updated=CURRENT_TIMESTAMP WHERE id=?",
+                (account_id, AUTO_MODEL_ID, self._chat),
+            )
+            self.db.commit()
+            self.chatsChanged.emit()
         self.accountsChanged.emit()
         self.quotaChanged.emit()
         self.loadModels()
@@ -1203,7 +1210,11 @@ class Bridge(QObject):
                 if body.get("success") is False:
                     raise ValueError(str(body.get("errors")))
                 items = body.get("result") or []
-                models.extend(normalize_model(x) for x in items)
+                for x in items:
+                    nm = str(x.get("name") or "").lower()
+                    if any(paid in nm for paid in ("deepseek-v4", "kimi-k2", "gemma-3-12b")):
+                        continue
+                    models.append(normalize_model(x))
                 info = body.get("result_info") or {}
                 if not items or (info.get("total_pages") and page >= info["total_pages"]) or len(items) < 100:
                     break
@@ -1458,11 +1469,25 @@ class Bridge(QObject):
         system_prompt: str = "",
     ) -> tuple[dict, float]:
         t0 = time.monotonic()
+        switched_reason = ""
+        pref_task = self._task_mode if self._task_mode != "all" else ""
+
+        # Hard guard: NEVER send a Cloudflare (@cf/ or @hf/) model ID to Groq, or a Groq model ID to Cloudflare!
+        if account["provider"] == "groq" and model.startswith(("@cf/", "@hf/")):
+            cf_acc = next((a for a in self._accounts if a["provider"] == "cloudflare"), None)
+            if cf_acc:
+                account = cf_acc
+            else:
+                acc_ms = self._fetch_models_for_account(account)
+                model, switched_reason = select_best_model(acc_ms, prompt, attachment, preferred_task=pref_task)
+        elif account["provider"] == "cloudflare" and not model.startswith(("@cf/", "@hf/")):
+            acc_ms = self._fetch_models_for_account(account)
+            model, switched_reason = select_best_model(acc_ms, prompt, attachment, preferred_task=pref_task)
+
         token = self._token(account["id"])
         max_tok = int(self.settings.value("maxTokens", 4096))
         temp = float(self.settings.value("temperature", 0.6))
         sys_prompt = system_prompt.strip() or str(self.settings.value("systemPrompt", "")).strip()
-        switched_reason = ""
 
         if attachment and attachment["kind"] == "audio" and task != "automatic-speech-recognition" and not custom_json.strip():
             asr_acc, asr_model = self._find_best_account_and_model("automatic-speech-recognition", prompt, attachment, preferred_account=account)
@@ -1490,15 +1515,18 @@ class Bridge(QObject):
             attachment = None
 
         # Pre-check: if the full uncut document + conversation exceeds Groq's per-minute TPM cap (8,000 tokens),
-        # automatically route to a 128K full-context model BEFORE sending so zero text is ever cut!
+        # or if Groq's remaining minute tokens are low (< 3,800), automatically route to a 128K full-context Cloudflare model!
         if account["provider"] == "groq" and task in CHAT_TASKS and not custom_json.strip():
             doc_str = attachment.get("text", "") if (attachment and attachment.get("kind") == "document") else ""
             hist_str = " ".join((m.get("content") or "") + " " + (m.get("attachment_text") or "") for m in history[-10:])
             est_input_tok = estimate_tokens(prompt + " " + doc_str + " " + hist_str)
             limits = get_groq_model_limits(model)
             tpm_cap = limits.get("tpm") or 8000
-            if est_input_tok + 1200 > tpm_cap:
-                hi_acc, hi_model, hi_reason = self._find_high_context_128k_model(est_input_tok, prompt, attachment)
+            rl = self._rate_limits.get(account["id"], {})
+            rem_tpm = rl.get("remaining_tokens")
+            needs_switch = (est_input_tok + 1800 > tpm_cap) or (isinstance(rem_tpm, int) and rem_tpm < est_input_tok + 2200)
+            if needs_switch:
+                hi_acc, hi_model, hi_reason = self._find_high_context_128k_model(max(est_input_tok, 8000), prompt, attachment)
                 if hi_acc and hi_model:
                     account = hi_acc
                     model = hi_model
@@ -1607,6 +1635,8 @@ class Bridge(QObject):
             result = parse_response(data, mime, prompt_est_str, task, model_id=model)
 
         result["model_used"] = model.split("/")[-1]
+        result["full_model_id"] = model
+        result["account_used"] = account
         if switched_reason:
             result["switched_reason"] = switched_reason
 
@@ -1776,6 +1806,8 @@ class Bridge(QObject):
             auto_pass = 0
             is_trunc = bool(result.get("truncated")) and result.get("kind") == "text"
             merged_content = result.get("text", "")
+            cont_account = result.get("account_used") or exec_account
+            cont_model = result.get("full_model_id") or actual_model
             while is_trunc and auto_pass < 3:
                 auto_pass += 1
                 self._busy_stage = f"⚡ Yanıt uzun olduğu için kaldığı yerden otomatik tamamlanıyor (Parça {auto_pass + 1})…"
@@ -1791,13 +1823,15 @@ class Bridge(QObject):
                 )
                 try:
                     cont_res, cont_ms = self._execute_model_call(
-                        account=exec_account,
-                        model=actual_model,
+                        account=cont_account,
+                        model=cont_model,
                         task=task,
                         history=cont_history,
                         prompt=continue_prompt,
                         attachment=None,
                     )
+                    cont_account = cont_res.get("account_used") or cont_account
+                    cont_model = cont_res.get("full_model_id") or cont_model
                 except Exception:
                     break
                 addition = (cont_res.get("text") or "").strip()
@@ -1844,56 +1878,79 @@ class Bridge(QObject):
         if not row or row["role"] != "assistant":
             return
         chat = self.db.execute("SELECT * FROM chats WHERE id=?", (self._chat,)).fetchone()
-        account = self._account(chat["account"])
-        rows = self.db.execute(
-            "SELECT role, content, attachment, attachment_text, kind, media FROM messages WHERE chat=? AND id<=? ORDER BY id",
-            (self._chat, message_id),
-        ).fetchall()
-        history = [dict(r) for r in rows]
+        account = self._account(self._active_account or chat["account"])
         selected_model = chat["model"] or AUTO_MODEL_ID
         existing_content = row["content"] or ""
+        current_chat = self._chat
 
         def work():
-            if not self._models:
-                self._models = self._fetch_models_for_account(account)
+            acc_models = self._fetch_models_for_account(account)
+            pref_task = self._task_mode if self._task_mode != "all" else ""
             actual_model = selected_model
-            if selected_model in (AUTO_MODEL_ID, "auto", "") or not any(m["id"] == selected_model for m in self._models):
-                actual_model, _ = select_best_model(self._models, existing_content[-400:])
-            task = next((m["task"] for m in self._models if m["id"] == actual_model), "text-generation")
-            continue_prompt = (
-                "Önceki yanıtın yarıda kesildi. Lütfen son kaldığın cümleden itibaren tekrar etmeden "
-                "doğrudan devam et ve yanıtı eksiksiz tamamla."
-            )
-            result, elapsed_ms = self._execute_model_call(
-                account=account,
-                model=actual_model,
-                task=task,
-                history=history,
-                prompt=continue_prompt,
-                attachment=None,
-            )
-            addition = (result.get("text") or "").strip()
-            merged = (existing_content.rstrip() + "\n" + addition) if addition else existing_content
-            usage = result.get("usage") or {}
-            self.db.execute(
-                "UPDATE messages SET content=?, prompt_tokens=prompt_tokens+?, completion_tokens=completion_tokens+?, "
-                "total_tokens=total_tokens+?, neurons=neurons+?, elapsed_ms=elapsed_ms+?, truncated=? WHERE id=?",
-                (
-                    merged,
-                    int(usage.get("prompt_tokens") or 0),
-                    int(usage.get("completion_tokens") or 0),
-                    int(usage.get("total_tokens") or 0),
-                    float(usage.get("neurons") or 0.0),
-                    int(round(elapsed_ms)),
-                    1 if result.get("truncated") else 0,
-                    message_id,
-                ),
-            )
-            self.db.commit()
-            self.messagesChanged.emit()
-            self.artifactsChanged.emit()
-            self.quotaChanged.emit()
-            self.notice.emit("Yanıt kaldığı yerden tamamlandı.")
+            if selected_model in (AUTO_MODEL_ID, "auto", "") or not any(m["id"] == selected_model for m in acc_models):
+                actual_model, _ = select_best_model(acc_models, existing_content[-400:], preferred_task=pref_task)
+            task = next((m["task"] for m in acc_models if m["id"] == actual_model), "text-generation")
+
+            merged = existing_content
+            cont_account = account
+            cont_model = actual_model
+            auto_pass = 0
+            is_trunc = True
+
+            while is_trunc and auto_pass < 3:
+                auto_pass += 1
+                self._busy_stage = f"⚡ Yanıt kaldığı yerden tamamlanıyor (Parça {auto_pass})…"
+                self.busyChanged.emit()
+                cont_rows = self.db.execute(
+                    "SELECT role, content, attachment, attachment_text, kind, media FROM messages WHERE chat=? AND id<=? ORDER BY id",
+                    (current_chat, message_id),
+                ).fetchall()
+                history = [dict(r) for r in cont_rows]
+                continue_prompt = (
+                    "Önceki yanıtın yarıda kesildi. Lütfen son kaldığın satırdan/cümleden itibaren tekrar etmeden "
+                    "doğrudan devam et ve kalan tüm kodları/açıklamaları eksiksiz tamamla."
+                )
+                result, elapsed_ms = self._execute_model_call(
+                    account=cont_account,
+                    model=cont_model,
+                    task=task,
+                    history=history,
+                    prompt=continue_prompt,
+                    attachment=None,
+                )
+                cont_account = result.get("account_used") or cont_account
+                cont_model = result.get("full_model_id") or cont_model
+                addition = (result.get("text") or "").strip()
+                if not addition:
+                    self.db.execute("UPDATE messages SET truncated=0 WHERE id=?", (message_id,))
+                    self.db.commit()
+                    break
+                merged = (merged.rstrip() + "\n" + addition) if merged else addition
+                usage = result.get("usage") or {}
+                is_trunc = bool(result.get("truncated"))
+                self.db.execute(
+                    "UPDATE messages SET content=?, prompt_tokens=prompt_tokens+?, completion_tokens=completion_tokens+?, "
+                    "total_tokens=total_tokens+?, neurons=neurons+?, elapsed_ms=elapsed_ms+?, truncated=? WHERE id=?",
+                    (
+                        merged,
+                        int(usage.get("prompt_tokens") or 0),
+                        int(usage.get("completion_tokens") or 0),
+                        int(usage.get("total_tokens") or 0),
+                        float(usage.get("neurons") or 0.0),
+                        int(round(elapsed_ms)),
+                        1 if is_trunc else 0,
+                        message_id,
+                    ),
+                )
+                self.db.commit()
+                self._sync_code_artifacts_to_disk(current_chat)
+                self.messagesChanged.emit()
+                self.artifactsChanged.emit()
+                self.workspaceChanged.emit()
+                self.quotaChanged.emit()
+
+            proj_path = self._sync_code_artifacts_to_disk(current_chat)
+            self.notice.emit(f"✅ Yanıt tamamlandı ve dosyalar kaydedildi: {proj_path}")
 
         self._run(work, stage="Yanıt devam ettiriliyor…")
 

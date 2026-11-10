@@ -254,14 +254,19 @@ C.ApplicationWindow {
         Qt.callLater(() => { renameField.forceActiveFocus(); renameField.selectAll() })
     }
 
-    RowLayout {
-        anchors.fill: parent; spacing: 0
+    Item {
+        anchors.fill: parent
+        clip: true
 
-        // ======================== LEFT SIDEBAR (Responsive & Collapsible) ========================
+        // ======================== LEFT SIDEBAR (Strictly Anchored to Left Edge) ========================
         Rectangle {
+            id: leftSidebar
             visible: root.leftSidebarOpen && !root.narrowWindow
-            Layout.preferredWidth: visible ? Math.min(264, Math.max(190, Math.round(root.width * 0.175))) : 0
-            Layout.fillHeight: true; color: side; clip: true
+            width: visible ? Math.min(256, Math.max(185, Math.round(root.width * 0.17))) : 0
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            color: side; clip: true
             Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: line }
 
             ColumnLayout {
@@ -437,13 +442,23 @@ C.ApplicationWindow {
             }
         }
 
-        // ======================== MAIN CONTENT AREA ========================
-        ColumnLayout {
-            Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320; spacing: 0; clip: true
+        // ======================== MAIN CONTENT AREA (Strictly Anchored between Left Sidebar & Right Edge) ========================
+        Item {
+            id: mainArea
+            anchors.left: leftSidebar.right
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            clip: true
 
             // Top Header Bar
             Rectangle {
-                Layout.fillWidth: true; Layout.preferredHeight: 62; color: bg
+                id: topHeader
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 62
+                color: bg; clip: true
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: line }
 
                 RowLayout {
@@ -454,7 +469,7 @@ C.ApplicationWindow {
                         onClicked: root.leftSidebarOpen = !root.leftSidebarOpen
                     }
                     ColumnLayout {
-                        Layout.fillWidth: true; Layout.minimumWidth: 120; spacing: 2
+                        Layout.fillWidth: true; Layout.minimumWidth: 100; spacing: 2
                         RowLayout {
                             Layout.fillWidth: true; spacing: 6
                             C.Label {
@@ -526,21 +541,17 @@ C.ApplicationWindow {
                 }
             }
 
-            RowLayout {
-                Layout.fillWidth: true; Layout.fillHeight: true; spacing: 0
-
-                Loader {
-                    Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 280; clip: true
-                    sourceComponent: libraryOpen ? libraryPage : chatPage
-                }
-
-                // ======================== RIGHT PANEL: ARTIFACTS, DOCUMENTS, CODE & MEDIA ========================
-                Rectangle {
-                    visible: rightPanelOpen && !libraryOpen
-                    Layout.preferredWidth: visible ? Math.min(340, Math.max(220, Math.round(root.width * 0.22))) : 0
-                    Layout.fillHeight: true; clip: true
-                    color: side
-                    Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: line }
+            // ======================== RIGHT PANEL: ARTIFACTS, DOCUMENTS, CODE & MEDIA (Strictly Anchored to Right Edge) ========================
+            Rectangle {
+                id: rightPanel
+                visible: rightPanelOpen && !libraryOpen
+                width: visible ? Math.min(330, Math.max(220, Math.round(root.width * 0.21))) : 0
+                anchors.right: parent.right
+                anchors.top: topHeader.bottom
+                anchors.bottom: parent.bottom
+                clip: true
+                color: side
+                Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: line }
 
                     ColumnLayout {
                         anchors.fill: parent; anchors.margins: 12; spacing: 8
@@ -733,12 +744,22 @@ C.ApplicationWindow {
                                 anchors.centerIn: parent
                                 width: parent.width - 24
                                 visible: filteredArtifacts.length === 0
-                                text: "Modelin ürettiği dilekçeler, UDF/DOCX/PDF evraklar, kod blokları, proje dosyaları ve görseller burada listelenir."
+                                text: "Modelin ürettiği kod dosyaları, projeler, DOCX/PDF/UDF belgeler ve görseller burada listelenir."
                                 color: muted; font.pixelSize: 11; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter
                             }
                         }
                     }
                 }
+
+            // ======================== CENTER PAGE LOADER (Strictly Anchored between Left Sidebar & Right Panel) ========================
+            Loader {
+                id: centerLoader
+                anchors.left: parent.left
+                anchors.right: rightPanel.left
+                anchors.top: topHeader.bottom
+                anchors.bottom: parent.bottom
+                clip: true
+                sourceComponent: libraryOpen ? libraryPage : chatPage
             }
         }
     }

@@ -147,10 +147,14 @@ def model_modalities(task: str, badges: list[str], name: str) -> dict:
     has_audio_out = task == "text-to-speech" or any(k in lower for k in ("aura", "melotts", "orpheus", "playai", "tts"))
     has_image_out = task == "text-to-image"
     has_reasoning = "Derin düşünme" in badges or any(k in lower for k in ("qwq", "r1", "reason", "thinking", "gpt-oss"))
-    is_dedicated_coder = any(k in lower for k in ("coder", "codestral", "code", "starcoder"))
-    has_coding = is_dedicated_coder or any(
-        k in lower
-        for k in ("deepseek", "gpt-oss", "qwen3", "qwq", "llama-3.3-70b", "llama-4-scout", "gemma-4-26b", "mistral-small-3.1", "nemotron")
+    is_paid_only_cf = any(p in lower for p in ("deepseek-v4", "kimi-k2", "gemma-3-12b"))
+    is_dedicated_coder = (task in CHAT_TASKS) and not is_paid_only_cf and any(k in lower for k in ("coder", "codestral", "code", "starcoder"))
+    has_coding = (task in CHAT_TASKS) and not is_paid_only_cf and (
+        is_dedicated_coder
+        or any(
+            k in lower
+            for k in ("deepseek", "gpt-oss", "qwen3", "qwq", "llama-3.3-70b", "llama-4-scout", "gemma-4-26b", "mistral-small-3.1", "nemotron")
+        )
     )
     has_tools = "Araç çağırma" in badges or any(k in lower for k in ("llama-3.3", "llama-3.1", "qwen", "gpt-oss", "mistral", "gemma-3"))
 
