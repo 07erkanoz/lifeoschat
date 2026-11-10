@@ -8,10 +8,13 @@ import org.kde.kirigami as Kirigami
 C.ApplicationWindow {
     id: root
     visible: true
-    width: 1560; height: 950
-    minimumWidth: 1120; minimumHeight: 680
+    width: 1520; height: 920
+    minimumWidth: 720; minimumHeight: 480
     title: "LifeOS Chat — Yapay Zekâ, Kodlama, Belge, Görsel & Canlı Ses Stüdyosu"
     font.family: "Inter, Noto Sans"
+
+    readonly property bool compactWindow: root.width < 1180
+    readonly property bool narrowWindow: root.width < 940
 
     readonly property bool dark: Kirigami.Theme.backgroundColor.hslLightness < 0.5
     readonly property color bg: dark ? "#0b0b10" : "#f7f6fb"
@@ -40,6 +43,7 @@ C.ApplicationWindow {
     property var attachmentPreview: JSON.parse(bridge.attachmentPreviewJson)
     property var artifacts: JSON.parse(bridge.artifactsJson)
     property var appSettings: JSON.parse(bridge.settingsJson)
+    property var workspaceInfo: JSON.parse(bridge.workspaceInfoJson)
 
     property string selectedModel: "__auto__"
     property string taskMode: "all" // "all" | "coding" | "document" | "vision" | "audio"
@@ -49,6 +53,7 @@ C.ApplicationWindow {
     property string filterTier: "Tümü"
     property string artifactTab: "Tümü"
     property bool libraryOpen: false
+    property bool leftSidebarOpen: true
     property bool rightPanelOpen: true
     property bool rawOpen: false
     property string statusText: ""
@@ -252,9 +257,11 @@ C.ApplicationWindow {
     RowLayout {
         anchors.fill: parent; spacing: 0
 
-        // ======================== LEFT SIDEBAR ========================
+        // ======================== LEFT SIDEBAR (Responsive & Collapsible) ========================
         Rectangle {
-            Layout.preferredWidth: 274; Layout.fillHeight: true; color: side
+            visible: root.leftSidebarOpen && !root.narrowWindow
+            Layout.preferredWidth: visible ? Math.min(264, Math.max(190, Math.round(root.width * 0.175))) : 0
+            Layout.fillHeight: true; color: side; clip: true
             Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: line }
 
             ColumnLayout {
@@ -432,72 +439,88 @@ C.ApplicationWindow {
 
         // ======================== MAIN CONTENT AREA ========================
         ColumnLayout {
-            Layout.fillWidth: true; Layout.fillHeight: true; spacing: 0
+            Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320; spacing: 0; clip: true
 
             // Top Header Bar
             Rectangle {
-                Layout.fillWidth: true; Layout.preferredHeight: 66; color: bg
+                Layout.fillWidth: true; Layout.preferredHeight: 62; color: bg
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: line }
 
                 RowLayout {
-                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22; spacing: 10
+                    anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 16; spacing: 8
+                    ActionButton {
+                        implicitHeight: 32; leftPadding: 10; rightPadding: 10
+                        text: root.leftSidebarOpen ? "☰" : "☰ Menü"
+                        onClicked: root.leftSidebarOpen = !root.leftSidebarOpen
+                    }
                     ColumnLayout {
-                        spacing: 2
+                        Layout.fillWidth: true; Layout.minimumWidth: 120; spacing: 2
                         RowLayout {
-                            spacing: 6
+                            Layout.fillWidth: true; spacing: 6
                             C.Label {
+                                Layout.fillWidth: true
                                 text: libraryOpen ? "Model Kütüphanesi & Yetenek Rehberi" : (activeChat ? activeChat.title : "Yeni Bir Görevle Başlayın")
-                                color: ink; font.pixelSize: 17; font.bold: true; elide: Text.ElideRight; Layout.maximumWidth: 380
+                                color: ink; font.pixelSize: 16; font.bold: true; elide: Text.ElideRight
                             }
                             ActionButton {
-                                visible: !libraryOpen && !!activeChat
+                                visible: !libraryOpen && !!activeChat && !root.compactWindow
                                 implicitHeight: 24; leftPadding: 7; rightPadding: 7
                                 text: "✎ Adı Değiştir"
                                 onClicked: root.openRenameModal(activeChat.id, activeChat.title)
                             }
                         }
                         C.Label {
+                            Layout.fillWidth: true
                             text: libraryOpen
                                 ? models.length + " model · Kodlama, Görüntü, Ses ve Metin yeteneklerine göre gruplandı"
                                 : (root.taskMode === "coding"
-                                    ? "💻 Code & Debug Modu aktif · Sadece kodlama & hata ayıklama destekli modeller listelenir"
+                                    ? "💻 Code & Debug Modu · Klasör: " + (workspaceInfo.effectiveDir || "")
                                     : (selectedModel === "__auto__"
                                         ? "⚡ Otomatik Model Seçimi aktif · Kod/Proje, PDF, DOCX, XLSX, UDF, Görsel ve Canlı Ses destekli"
                                         : (selectedModelInfo ? selectedModelInfo.modalityBadge + " · " + selectedModelInfo.purpose : "Model seçin")))
-                            color: root.taskMode === "coding" ? cyanAccent : muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.maximumWidth: 560
+                            color: root.taskMode === "coding" ? cyanAccent : muted; font.pixelSize: 11; elide: Text.ElideRight
                         }
                     }
-
-                    Item { Layout.fillWidth: true }
 
                     // Live Generating Pill
                     Rectangle {
                         visible: bridge.busy
                         radius: 14; color: purpleSoft; border.color: purple
-                        implicitHeight: 32; implicitWidth: busyRow.implicitWidth + 22
+                        implicitHeight: 30; implicitWidth: Math.min(260, busyRow.implicitWidth + 20)
                         RowLayout {
-                            id: busyRow; anchors.centerIn: parent; spacing: 8
-                            C.BusyIndicator { running: bridge.busy; implicitWidth: 18; implicitHeight: 18 }
-                            C.Label { text: bridge.busyStage || "Çalışıyor…"; color: purple; font.pixelSize: 11; font.bold: true }
+                            id: busyRow; anchors.centerIn: parent; spacing: 6
+                            C.BusyIndicator { running: bridge.busy; implicitWidth: 16; implicitHeight: 16 }
+                            C.Label { text: bridge.busyStage || "Çalışıyor…"; color: purple; font.pixelSize: 11; font.bold: true; elide: Text.ElideRight; Layout.maximumWidth: 210 }
                         }
                     }
 
                     ActionButton {
+                        accentStyle: !!workspaceInfo.customWorkspace
+                        text: root.compactWindow ? "📁 Klasör" : ("📁 Klasör: " + (workspaceInfo.folderName || "Seç"))
+                        onClicked: workspaceFolderDialog.open()
+                    }
+                    ActionButton {
+                        visible: !root.narrowWindow
+                        text: "📂 Klasörü Aç"
+                        onClicked: bridge.openWorkspaceFolder()
+                    }
+                    ActionButton {
                         accentStyle: bridge.liveVoiceActive
-                        text: "🎙️ Canlı Ses (Live)"
+                        text: root.compactWindow ? "🎙️ Ses" : "🎙️ Canlı Ses"
                         onClicked: bridge.startLiveVoiceSession()
                     }
                     ActionButton {
+                        visible: !root.compactWindow
                         text: "📊 Kota (" + (quota.chatTotalTokens || 0) + ")"
                         onClicked: quotaDialog.open()
                     }
                     ActionButton {
                         accentStyle: rightPanelOpen
-                        text: "📂 Çıktılar & Evraklar (" + artifacts.length + ")"
+                        text: root.compactWindow ? ("📂 (" + artifacts.length + ")") : ("📂 Çıktılar (" + artifacts.length + ")")
                         onClicked: rightPanelOpen = !rightPanelOpen
                     }
                     ActionButton {
-                        text: "⚙ Ayarlar"
+                        text: "⚙"
                         onClicked: settingsDialog.open()
                     }
                 }
@@ -507,26 +530,65 @@ C.ApplicationWindow {
                 Layout.fillWidth: true; Layout.fillHeight: true; spacing: 0
 
                 Loader {
-                    Layout.fillWidth: true; Layout.fillHeight: true
+                    Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 280; clip: true
                     sourceComponent: libraryOpen ? libraryPage : chatPage
                 }
 
                 // ======================== RIGHT PANEL: ARTIFACTS, DOCUMENTS, CODE & MEDIA ========================
                 Rectangle {
                     visible: rightPanelOpen && !libraryOpen
-                    Layout.preferredWidth: visible ? 348 : 0
-                    Layout.fillHeight: true
+                    Layout.preferredWidth: visible ? Math.min(340, Math.max(220, Math.round(root.width * 0.22))) : 0
+                    Layout.fillHeight: true; clip: true
                     color: side
                     Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: line }
 
                     ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 14; spacing: 10
+                        anchors.fill: parent; anchors.margins: 12; spacing: 8
 
                         RowLayout {
                             Layout.fillWidth: true
-                            C.Label { text: "📂 ÜRETİLEN EVRAK, KOD & MEDYA"; color: ink; font.pixelSize: 12; font.bold: true }
-                            Item { Layout.fillWidth: true }
+                            C.Label { Layout.fillWidth: true; text: "📂 ÜRETİLEN DOSYA, KOD & EVRAK"; color: ink; font.pixelSize: 12; font.bold: true; elide: Text.ElideRight }
                             C.ToolButton { text: "×"; onClicked: rightPanelOpen = false }
+                        }
+
+                        // Active Project / Workspace Directory Box (shows EXACT disk location where files are saved!)
+                        Rectangle {
+                            Layout.fillWidth: true; implicitHeight: wsCol.implicitHeight + 16
+                            radius: 10; color: card2; border.color: purple
+                            ColumnLayout {
+                                id: wsCol; anchors.fill: parent; anchors.margins: 8; spacing: 5
+                                C.Label {
+                                    Layout.fillWidth: true
+                                    text: "📍 Otomatik Kayıt & Çalışma Klasörü:"
+                                    color: cyanAccent; font.pixelSize: 10; font.bold: true
+                                }
+                                C.Label {
+                                    Layout.fillWidth: true
+                                    text: workspaceInfo.effectiveDir || ""
+                                    color: ink; font.pixelSize: 10; font.family: "monospace"
+                                    wrapMode: Text.WrapAnywhere; maximumLineCount: 2; elide: Text.ElideMiddle
+                                }
+                                Flow {
+                                    Layout.fillWidth: true; spacing: 5
+                                    ActionButton {
+                                        implicitHeight: 24; leftPadding: 8; rightPadding: 8
+                                        accentStyle: true
+                                        text: "📂 Klasörü Aç"
+                                        onClicked: bridge.openWorkspaceFolder()
+                                    }
+                                    ActionButton {
+                                        implicitHeight: 24; leftPadding: 8; rightPadding: 8
+                                        text: "📁 Klasör Seç…"
+                                        onClicked: workspaceFolderDialog.open()
+                                    }
+                                    ActionButton {
+                                        visible: !!workspaceInfo.customWorkspace
+                                        implicitHeight: 24; leftPadding: 7; rightPadding: 7
+                                        text: "↺ Sıfırla"
+                                        onClicked: bridge.clearWorkspaceDir()
+                                    }
+                                }
+                            }
                         }
 
                         // Filter Tabs for Right Panel
@@ -580,6 +642,12 @@ C.ApplicationWindow {
                                             Layout.fillWidth: true; spacing: 1
                                             C.Label { Layout.fillWidth: true; text: modelData.title; color: ink; font.pixelSize: 12; font.bold: true; elide: Text.ElideRight }
                                             C.Label { Layout.fillWidth: true; text: modelData.badge; color: muted; font.pixelSize: 10; elide: Text.ElideRight }
+                                            C.Label {
+                                                visible: !!modelData.savedPath
+                                                Layout.fillWidth: true
+                                                text: "📍 " + (modelData.savedPath || "")
+                                                color: greenAccent; font.pixelSize: 9; font.family: "monospace"; elide: Text.ElideMiddle
+                                            }
                                         }
                                     }
 
@@ -1028,18 +1096,19 @@ C.ApplicationWindow {
         ColumnLayout {
             spacing: 0
 
-            // Provider, Task Mode & Smart Model Selector Bar
+            // Provider, Task Mode & Smart Model Selector Bar (Responsive)
             Rectangle {
-                Layout.fillWidth: true; implicitHeight: 92; color: side
+                Layout.fillWidth: true; implicitHeight: topSelectorCol.implicitHeight + 16; color: side
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: line }
 
                 ColumnLayout {
-                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
+                    id: topSelectorCol
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                    anchors.leftMargin: 16; anchors.rightMargin: 16; anchors.topMargin: 8; spacing: 6
 
-                    // Row 1: Task Mode Filter Pills (All / Code & Debug / Document & Data / Vision / Audio)
-                    RowLayout {
-                        Layout.fillWidth: true; spacing: 8
-                        C.Label { text: "ÇALIŞMA MODU"; color: muted; font.pixelSize: 10; font.bold: true }
+                    // Row 1: Task Mode Filter Pills (Wraps cleanly with Flow when window shrinks!)
+                    Flow {
+                        Layout.fillWidth: true; spacing: 6
                         Repeater {
                             model: [
                                 { id: "all", label: "⚡ Tümü (Genel)" },
@@ -1059,30 +1128,25 @@ C.ApplicationWindow {
                                 }
                             }
                         }
-                        Item { Layout.fillWidth: true }
-                        C.Label {
-                            visible: root.taskMode === "coding"
-                            text: "✓ Sadece kod yazma ve hata ayıklama destekli modeller aktif"
-                            color: cyanAccent; font.pixelSize: 11; font.bold: true
-                        }
                     }
 
-                    // Row 2: Account & Filtered Model Selector
+                    // Row 2: Account & Filtered Model Selector (Responsive minimumWidth: 80)
                     RowLayout {
-                        Layout.fillWidth: true; spacing: 10
-                        C.Label { text: "HESAP"; color: muted; font.pixelSize: 10; font.bold: true }
+                        Layout.fillWidth: true; spacing: 8
+                        C.Label { visible: !root.compactWindow; text: "HESAP"; color: muted; font.pixelSize: 10; font.bold: true }
                         C.ComboBox {
-                            Layout.preferredWidth: 190
+                            Layout.preferredWidth: root.compactWindow ? 135 : 180
+                            Layout.minimumWidth: 110
                             model: accounts.map(a => a.title + " · " + (a.provider === "groq" ? "Groq" : "Cloudflare"))
                             currentIndex: Math.max(0, accounts.findIndex(a => a.id === bridge.activeAccount))
                             onActivated: index => { bridge.setActiveAccount(accounts[index].id); selectedModel = "__auto__" }
                         }
                         ActionButton { text: "＋"; onClicked: accountDialog.open() }
 
-                        C.Label { text: "MODEL SEÇİMİ"; color: muted; font.pixelSize: 10; font.bold: true; Layout.leftMargin: 6 }
+                        C.Label { visible: !root.compactWindow; text: "MODEL"; color: muted; font.pixelSize: 10; font.bold: true; Layout.leftMargin: 4 }
                         C.ComboBox {
                             id: modelBox
-                            Layout.fillWidth: true
+                            Layout.fillWidth: true; Layout.minimumWidth: 120
                             model: modelComboItems.map(x => x.label)
                             currentIndex: Math.max(0, modelComboItems.findIndex(x => x.id === selectedModel))
                             onActivated: index => {
@@ -1091,7 +1155,7 @@ C.ApplicationWindow {
                             }
                         }
                         ActionButton {
-                            text: selectedModel === "__auto__" ? "⚡ Otomatik Aktif" : "⚡ Otomatiğe Al"
+                            text: selectedModel === "__auto__" ? "⚡ Otomatik" : "⚡ Otomatiğe Al"
                             accentStyle: selectedModel === "__auto__"
                             onClicked: {
                                 selectedModel = "__auto__"
@@ -1099,6 +1163,7 @@ C.ApplicationWindow {
                             }
                         }
                         ActionButton {
+                            visible: !root.narrowWindow
                             text: "▦ Kütüphane"
                             onClicked: libraryOpen = true
                         }
@@ -1570,11 +1635,10 @@ C.ApplicationWindow {
                         }
                     }
 
-                    // Code & Debug Quick Actions Toolbar (visible when Code mode is active)
-                    RowLayout {
+                    // Code & Debug Quick Actions Toolbar (Responsive Flow when Code mode is active)
+                    Flow {
                         visible: root.taskMode === "coding"
                         Layout.fillWidth: true; spacing: 6
-                        C.Label { text: "💻 Hızlı Kod Araçları:"; color: cyanAccent; font.pixelSize: 11; font.bold: true }
                         Repeater {
                             model: [
                                 { label: "🐞 Hata Ayıkla (Debug)", prefix: "Aşağıdaki kodda/hata çıktısında kök nedeni analiz et, hatayı açıkla ve düzeltilmiş tam çalışan kodu ver:\n\n" },
@@ -1594,7 +1658,6 @@ C.ApplicationWindow {
                                 }
                             }
                         }
-                        Item { Layout.fillWidth: true }
                     }
 
                     C.TextArea {
@@ -1618,30 +1681,39 @@ C.ApplicationWindow {
                     }
 
                     RowLayout {
-                        Layout.fillWidth: true; spacing: 8
-                        ActionButton {
-                            text: "📎  Dosya / Kod / Belge Ekle"
-                            onClicked: filePicker.open()
+                        Layout.fillWidth: true; spacing: 6
+                        Flow {
+                            Layout.fillWidth: true; spacing: 6
+                            ActionButton {
+                                text: "📎 Dosya / Kod Ekle"
+                                onClicked: filePicker.open()
+                            }
+                            ActionButton {
+                                text: "📁 Çalışma Klasörü Seç"
+                                onClicked: workspaceFolderDialog.open()
+                            }
+                            ActionButton {
+                                text: bridge.recording ? "■ Kaydı Bitir" : "🎙️ Ses Kaydet"
+                                accentStyle: bridge.recording
+                                onClicked: bridge.toggleRecording()
+                            }
+                            ActionButton {
+                                visible: !root.compactWindow
+                                text: "◎ Canlı Ses"
+                                onClicked: bridge.startLiveVoiceSession()
+                            }
+                            ActionButton {
+                                visible: !root.compactWindow
+                                text: rawOpen ? "{} JSON Kapat" : "{} JSON"
+                                onClicked: rawOpen = !rawOpen
+                            }
                         }
-                        ActionButton {
-                            text: bridge.recording ? "■  Kaydı Bitir" : "🎙️  Ses Kaydet"
-                            accentStyle: bridge.recording
-                            onClicked: bridge.toggleRecording()
-                        }
-                        ActionButton {
-                            text: "◎  Canlı Sesli Konuşma"
-                            onClicked: bridge.startLiveVoiceSession()
-                        }
-                        ActionButton {
-                            text: rawOpen ? "{} JSON Kapat" : "{} JSON Testi"
-                            onClicked: rawOpen = !rawOpen
-                        }
-                        Item { Layout.fillWidth: true }
                         C.Label {
+                            visible: !root.compactWindow
                             text: bridge.busy
                                 ? (bridge.busyStage || "Yanıt üretiliyor…")
-                                : (selectedModel === "__auto__" ? "⚡ İşe uygun model otomatik seçilecek · Enter gönder" : "Enter gönder · Shift+Enter yeni satır")
-                            color: bridge.busy ? purple : muted; font.pixelSize: 11
+                                : "Enter gönder"
+                            color: bridge.busy ? purple : muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.maximumWidth: 220
                         }
                         ActionButton {
                             accentStyle: true
@@ -1715,6 +1787,14 @@ C.ApplicationWindow {
         title: "Proje Dosyalarının Çıkarılacağı Klasörü Seçin"
         onAccepted: {
             bridge.exportAllCodeToFolder(selectedFolder.toString())
+        }
+    }
+
+    FolderDialog {
+        id: workspaceFolderDialog
+        title: "Proje / Çalışma Klasörünü Seçin (Üretilen Kodlar Buraya Otomatik Kaydedilir)"
+        onAccepted: {
+            bridge.setWorkspaceDir(selectedFolder.toString())
         }
     }
 

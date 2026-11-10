@@ -180,6 +180,7 @@ class Bridge(QObject):
     previewChanged = Signal()
     artifactsChanged = Signal()
     settingsChanged = Signal()
+    workspaceChanged = Signal()
     liveVoiceChanged = Signal()
     liveAudioReady = Signal(str, str)  # (audioUrl, assistantText)
     notice = Signal(str)
@@ -216,6 +217,50 @@ class Bridge(QObject):
         self._live_reply = ""
         self._dark_mode = True
         self._task_mode = "all"
+        self._workspace_dir = str(self.settings.value("workspaceDir", ""))
+
+    def _effective_project_dir(self, chat_id: str = "") -> Path:
+        """Returns the active user-selected workspace folder, or an automatic project folder under ~/projeler/LifeOS_Projeler/<chat>."""
+        if self._workspace_dir and Path(self._workspace_dir).exists():
+            return Path(self._workspace_dir)
+        cid = chat_id or self._chat
+        slug = "genel_proje"
+        if cid:
+            row = self.db.execute("SELECT title FROM chats WHERE id=?", (cid,)).fetchone()
+            raw_title = (row["title"] if row and row["title"] else cid[:8]).lower()
+            cleaned = re.sub(r"[^a-z0-9ğüşıöç_-]+", "_", raw_title).strip("_")[:36]
+            slug = f"{cleaned or 'proje'}_{cid[:6]}"
+        return Path.home() / "projeler" / "LifeOS_Projeler" / slug
+
+    def _sync_code_artifacts_to_disk(self, chat_id: str = "") -> str:
+        """Automatically writes any generated code files in the chat to the active project/workspace directory on disk."""
+        cid = chat_id or self._chat
+        if not cid:
+            return ""
+        rows = self.db.execute("SELECT * FROM messages WHERE chat=? ORDER BY id", (cid,)).fetchall()
+        messages = [dict(r) for r in rows]
+        items = extract_artifacts_from_messages(messages)
+        code_items = [x for x in items if x.get("category") == "code" and x.get("content")]
+        if not code_items:
+            return str(self._effective_project_dir(cid))
+        target_dir = self._effective_project_dir(cid)
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            best_by_name: dict[str, str] = {}
+            for item in code_items:
+                rel_name = item.get("title") or "kod.txt"
+                safe_rel = Path(rel_name).name if ".." in rel_name else rel_name.lstrip("/")
+                body = item["content"]
+                prev = best_by_name.get(safe_rel, "")
+                if not prev or len(body) >= len(prev) * 0.6:
+                    best_by_name[safe_rel] = body
+            for safe_rel, body in best_by_name.items():
+                dest = target_dir / safe_rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(body, encoding="utf-8")
+        except Exception:
+            pass
+        return str(target_dir)
 
     def _init_db(self) -> None:
         self.db.execute(
@@ -448,6 +493,64 @@ class Bridge(QObject):
     def setTaskMode(self, mode: str):
         self._task_mode = mode or "all"
 
+    @Slot(str)
+    def setWorkspaceDir(self, folder_url: str):
+        path = QUrl(folder_url).toLocalFile() if folder_url.startswith("file://") else folder_url
+        if not path:
+            return
+        p = Path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        self._workspace_dir = str(p)
+        self.settings.setValue("workspaceDir", self._workspace_dir)
+        if self._chat:
+            self._sync_code_artifacts_to_disk(self._chat)
+        self.workspaceChanged.emit()
+        self.artifactsChanged.emit()
+        self.notice.emit(f"📁 Çalışma klasörü seçildi: {p}")
+
+    @Slot()
+    def clearWorkspaceDir(self):
+        self._workspace_dir = ""
+        self.settings.setValue("workspaceDir", "")
+        self.workspaceChanged.emit()
+        self.artifactsChanged.emit()
+        self.notice.emit("Çalışma klasörü otomatik proje klasörüne sıfırlandı.")
+
+    @Slot()
+    def openWorkspaceFolder(self):
+        target = self._effective_project_dir(self._chat)
+        target.mkdir(parents=True, exist_ok=True)
+        if self._chat:
+            self._sync_code_artifacts_to_disk(self._chat)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    @Property(str, notify=workspaceChanged)
+    def workspaceInfoJson(self):
+        eff = self._effective_project_dir(self._chat)
+        files_list: list[dict] = []
+        if eff.exists():
+            try:
+                for f in sorted(eff.rglob("*")):
+                    if f.is_file() and not any(part.startswith(".") or part in ("__pycache__", "node_modules", "build", "venv") for part in f.parts):
+                        rel = str(f.relative_to(eff))
+                        files_list.append({
+                            "name": f.name,
+                            "relPath": rel,
+                            "fullPath": str(f),
+                            "sizeKb": round(f.stat().st_size / 1024.0, 1),
+                        })
+                        if len(files_list) >= 60:
+                            break
+            except Exception:
+                pass
+        return json.dumps({
+            "customWorkspace": self._workspace_dir,
+            "effectiveDir": str(eff),
+            "folderName": eff.name,
+            "fileCount": len(files_list),
+            "files": files_list,
+        }, ensure_ascii=False)
+
     @Slot()
     def toggleRecording(self):
         if self._recording:
@@ -663,11 +766,12 @@ class Bridge(QObject):
     def artifactsJson(self):
         if not self._chat:
             return "[]"
+        proj_dir = self._sync_code_artifacts_to_disk(self._chat)
         rows = self.db.execute("SELECT * FROM messages WHERE chat=? ORDER BY id", (self._chat,)).fetchall()
         messages = [dict(r) for r in rows]
         saved_rows = self.db.execute("SELECT * FROM artifacts WHERE chat=? ORDER BY created DESC", (self._chat,)).fetchall()
         saved_list = [dict(r) for r in saved_rows]
-        items = extract_artifacts_from_messages(messages, saved_files=saved_list)
+        items = extract_artifacts_from_messages(messages, saved_files=saved_list, saved_dir=proj_dir)
         return json.dumps(items, ensure_ascii=False)
 
     @Property(str, notify=messagesChanged)
@@ -1200,6 +1304,7 @@ class Bridge(QObject):
         self.chatsChanged.emit()
         self.messagesChanged.emit()
         self.artifactsChanged.emit()
+        self.workspaceChanged.emit()
         self.quotaChanged.emit()
 
     @Slot(str, str)
@@ -1210,6 +1315,7 @@ class Bridge(QObject):
         self.db.execute("UPDATE chats SET title=?, updated=CURRENT_TIMESTAMP WHERE id=?", (cleaned[:80], chat_id))
         self.db.commit()
         self.chatsChanged.emit()
+        self.workspaceChanged.emit()
         self.notice.emit(f"Sohbet adı '{cleaned[:40]}' olarak değiştirildi.")
 
     @Slot(str)
@@ -1222,6 +1328,7 @@ class Bridge(QObject):
             self.setActiveAccount(row["account"])
         self.messagesChanged.emit()
         self.artifactsChanged.emit()
+        self.workspaceChanged.emit()
         self.quotaChanged.emit()
 
     @Slot(str)
@@ -1635,7 +1742,7 @@ class Bridge(QObject):
                 result["url"] = QUrl.fromLocalFile(str(media_path)).toString()
 
             usage = result.get("usage") or {}
-            self.db.execute(
+            cur = self.db.execute(
                 "INSERT INTO messages(chat,role,content,thinking,kind,media,model_used,auto_reason,"
                 "prompt_tokens,completion_tokens,total_tokens,neurons,elapsed_ms,truncated) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1656,11 +1763,76 @@ class Bridge(QObject):
                     1 if result.get("truncated") else 0,
                 ),
             )
+            assistant_msg_id = cur.lastrowid
             self.db.commit()
+            self._sync_code_artifacts_to_disk(current_chat)
             self.chatsChanged.emit()
             self.messagesChanged.emit()
             self.artifactsChanged.emit()
+            self.workspaceChanged.emit()
             self.quotaChanged.emit()
+
+            # AUTO-CONTINUE: If the model hit max_tokens (truncated == True), automatically continue up to 3 passes so code/responses NEVER stop halfway!
+            auto_pass = 0
+            is_trunc = bool(result.get("truncated")) and result.get("kind") == "text"
+            merged_content = result.get("text", "")
+            while is_trunc and auto_pass < 3:
+                auto_pass += 1
+                self._busy_stage = f"⚡ Yanıt uzun olduğu için kaldığı yerden otomatik tamamlanıyor (Parça {auto_pass + 1})…"
+                self.busyChanged.emit()
+                cont_rows = self.db.execute(
+                    "SELECT role, content, attachment, attachment_text, kind, media FROM messages WHERE chat=? AND id<=? ORDER BY id",
+                    (current_chat, assistant_msg_id),
+                ).fetchall()
+                cont_history = [dict(r) for r in cont_rows]
+                continue_prompt = (
+                    "Önceki yanıtın token sınırına ulaştığı için tam şu noktada yarıda kesildi. "
+                    "Lütfen kaldığın satırdan/cümleden itibaren hiçbir şeyi tekrar etmeden doğrudan devam et ve kalan dosyaları/açıklamaları eksiksiz tamamla."
+                )
+                try:
+                    cont_res, cont_ms = self._execute_model_call(
+                        account=exec_account,
+                        model=actual_model,
+                        task=task,
+                        history=cont_history,
+                        prompt=continue_prompt,
+                        attachment=None,
+                    )
+                except Exception:
+                    break
+                addition = (cont_res.get("text") or "").strip()
+                if not addition:
+                    is_trunc = False
+                    self.db.execute("UPDATE messages SET truncated=0 WHERE id=?", (assistant_msg_id,))
+                    self.db.commit()
+                    break
+                merged_content = (merged_content.rstrip() + "\n" + addition) if merged_content else addition
+                c_usage = cont_res.get("usage") or {}
+                is_trunc = bool(cont_res.get("truncated"))
+                self.db.execute(
+                    "UPDATE messages SET content=?, prompt_tokens=prompt_tokens+?, completion_tokens=completion_tokens+?, "
+                    "total_tokens=total_tokens+?, neurons=neurons+?, elapsed_ms=elapsed_ms+?, truncated=? WHERE id=?",
+                    (
+                        merged_content,
+                        int(c_usage.get("prompt_tokens") or 0),
+                        int(c_usage.get("completion_tokens") or 0),
+                        int(c_usage.get("total_tokens") or 0),
+                        float(c_usage.get("neurons") or 0.0),
+                        int(round(cont_ms)),
+                        1 if is_trunc else 0,
+                        assistant_msg_id,
+                    ),
+                )
+                self.db.commit()
+                self._sync_code_artifacts_to_disk(current_chat)
+                self.messagesChanged.emit()
+                self.artifactsChanged.emit()
+                self.workspaceChanged.emit()
+                self.quotaChanged.emit()
+
+            if "```" in merged_content:
+                proj_path = self._sync_code_artifacts_to_disk(current_chat)
+                self.notice.emit(f"💾 Üretilen kod dosyaları otomatik olarak diske kaydedildi: {proj_path}")
 
         self._run(work, stage="İstek modele gönderiliyor…")
 

@@ -871,7 +871,7 @@ def parse_response(data: bytes, mime: str, prompt_text: str = "", task: str = "t
     }
 
 
-def extract_artifacts_from_messages(messages: list[dict], saved_files: list[dict] | None = None) -> list[dict]:
+def extract_artifacts_from_messages(messages: list[dict], saved_files: list[dict] | None = None, saved_dir: str = "") -> list[dict]:
     """Extracts generated documents, code/project files, images, and audio from chat messages for the Right Panel."""
     artifacts: list[dict] = []
 
@@ -882,10 +882,12 @@ def extract_artifacts_from_messages(messages: list[dict], saved_files: list[dict
         "python": "py", "py": "py", "javascript": "js", "js": "js", "typescript": "ts", "ts": "ts",
         "html": "html", "css": "css", "json": "json", "sql": "sql", "bash": "sh", "sh": "sh",
         "dart": "dart", "qml": "qml", "cpp": "cpp", "c": "c", "rust": "rs", "go": "go", "yaml": "yaml",
+        "cmake": "txt",
     }
 
     code_counter = 0
     doc_counter = 0
+    base_saved = Path(saved_dir) if saved_dir else None
 
     for m in messages:
         msg_id = m.get("id", 0)
@@ -906,12 +908,14 @@ def extract_artifacts_from_messages(messages: list[dict], saved_files: list[dict
                 else ("Ses Çıktısı" if role == "assistant" else "Ses Kaydı"),
                 "badge": "🎨 Görsel" if kind == "image" else "🔊 Ses",
                 "media": media,
+                "savedPath": media.replace("file://", ""),
                 "content": content,
             })
 
         if role != "assistant" or not content:
             continue
 
+        msg_code_count = 0
         # 2. Extract code blocks: ```lang [optional_filename] ... ```
         for match in re.finditer(r"```([^\n`]*)\n(.*?)```", content, re.DOTALL):
             header = match.group(1).strip()
@@ -919,24 +923,49 @@ def extract_artifacts_from_messages(messages: list[dict], saved_files: list[dict
             if not code_body:
                 continue
             code_counter += 1
+            msg_code_count += 1
             tokens = header.split()
             lang = tokens[0].lower() if tokens else "txt"
             filename = ""
-            if len(tokens) > 1 and ("." in tokens[1] or "/" in tokens[1]):
-                filename = tokens[1].strip()
+            if len(tokens) > 1 and ("." in tokens[1] or "/" in tokens[1] or tokens[1].lower() in ("cmakelists.txt", "makefile", "dockerfile")):
+                filename = tokens[1].strip("`*_():")
             elif "." in lang:
                 filename = lang
                 lang = Path(filename).suffix.lstrip(".") or "txt"
             else:
                 first_code_line = code_body.splitlines()[0].strip() if code_body else ""
-                m_file = re.match(r"^(?:#|//|--|/\*)\s*(?:dosya|file|path)?\s*:?\s*([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)", first_code_line, re.IGNORECASE)
+                m_file = re.match(r"^(?:#|//|--|/\*)\s*(?:dosya|file|path)?\s*:?\s*([A-Za-z0-9_./-]+\.[A-Za-z0-9]+|CMakeLists\.txt|Makefile|Dockerfile)", first_code_line, re.IGNORECASE)
                 if m_file:
                     filename = m_file.group(1)
                 else:
-                    ext = ext_by_lang.get(lang, "txt")
-                    filename = f"kod_{code_counter}.{ext}"
+                    pre_text = content[max(0, match.start() - 160) : match.start()]
+                    pre_matches = re.findall(r"([A-Za-z0-9_./-]+\.(?:cpp|c|h|hpp|py|js|ts|tsx|jsx|qml|html|css|json|yaml|yml|toml|rs|go|java|kt|dart|sh|sql|md|txt)|CMakeLists\.txt|Makefile|Dockerfile)", pre_text)
+                    valid_pre = ""
+                    if pre_matches:
+                        cand = pre_matches[-1]
+                        cand_ext = Path(cand).suffix.lstrip(".").lower()
+                        if lang in ("cmake", "txt", "") and cand.lower() == "cmakelists.txt":
+                            valid_pre = "CMakeLists.txt"
+                        elif lang in ("cpp", "c", "cxx", "cc", "h", "hpp") and cand_ext in ("cpp", "c", "h", "hpp"):
+                            valid_pre = cand
+                        elif ext_by_lang.get(lang) == cand_ext:
+                            valid_pre = cand
+                    if valid_pre:
+                        filename = valid_pre
+                    elif lang == "cmake":
+                        filename = "CMakeLists.txt"
+                    else:
+                        ext = ext_by_lang.get(lang, "txt")
+                        filename = f"kod_{code_counter}.{ext}"
 
             lines_cnt = len(code_body.splitlines())
+            saved_file_path = ""
+            if base_saved:
+                safe_rel = Path(filename).name if ".." in filename else filename.lstrip("/")
+                candidate = base_saved / safe_rel
+                if candidate.exists():
+                    saved_file_path = str(candidate)
+
             artifacts.append({
                 "id": f"code-{msg_id}-{code_counter}",
                 "messageId": msg_id,
@@ -944,21 +973,22 @@ def extract_artifacts_from_messages(messages: list[dict], saved_files: list[dict
                 "kind": "code",
                 "title": filename,
                 "lang": lang.upper(),
-                "badge": f"💻 {lang.upper()} · {lines_cnt} satır",
+                "badge": f"💻 {lang.upper()} · {lines_cnt} satır" + (" · 💾 Diskte" if saved_file_path else ""),
+                "savedPath": saved_file_path,
                 "content": code_body,
                 "media": "",
             })
 
-        # 3. Detect structured documents (petitions, contracts, reports, markdown tables/headings)
+        # 3. Detect structured documents (explicit formal documents, or non-code structured reports)
+        explicit_doc = any(k in content.upper() for k in (
+            "MAHKEMESİ", "MAHKEMESI", "MÜDÜRLÜĞÜ", "BAŞKANLIĞI", "DAVACI", "DAVALI",
+            "KONU:", "AÇIKLAMALAR", "SONUÇ VE İSTEM", "SÖZLEŞME", "TUTANAK", "RAPOR", "İHTARNAME",
+        ))
         is_legal_or_doc = (
             len(content) >= 280
             and (
-                any(k in content.upper() for k in (
-                    "MAHKEMESİ", "MAHKEMESI", "MÜDÜRLÜĞÜ", "BAŞKANLIĞI", "DAVACI", "DAVALI",
-                    "KONU:", "AÇIKLAMALAR", "SONUÇ VE İSTEM", "SÖZLEŞME", "TUTANAK", "RAPOR", "İHTARNAME",
-                ))
-                or content.count("#") >= 2
-                or content.count("| ---") >= 1
+                explicit_doc
+                or (msg_code_count == 0 and (content.count("#") >= 2 or content.count("| ---") >= 1))
             )
         )
         if is_legal_or_doc:
@@ -971,7 +1001,8 @@ def extract_artifacts_from_messages(messages: list[dict], saved_files: list[dict
                 "category": "document",
                 "kind": "document",
                 "title": first_line[:48],
-                "badge": f"📄 Belge Taslağı · {words_cnt} kelime · UDF/DOCX/PDF Hazır",
+                "badge": f"📄 Belge Taslağı · {words_cnt} kelime · DOCX/PDF/UDF Hazır",
+                "savedPath": "",
                 "content": content,
                 "media": "",
             })
