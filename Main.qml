@@ -133,12 +133,23 @@ C.ApplicationWindow {
                 root.rightPanelOpen = true
             }
         }
+        function onBusyChanged() {
+            if (bridge.busy) {
+                Qt.callLater(() => { if (root.messageList) root.messageList.positionViewAtEnd() })
+            }
+        }
         function onMessagesChanged() {
-            const keepAtBottom = !root.messageList || root.messageList.contentHeight <= root.messageList.height ||
-                root.messageList.contentY + root.messageList.height >= root.messageList.contentHeight - 90
             root.messages = JSON.parse(bridge.messagesJson)
             if (root.activeChat && root.activeChat.model) root.selectedModel = root.activeChat.model
-            if (keepAtBottom) Qt.callLater(() => { if (root.messageList) root.messageList.positionViewAtEnd() })
+            Qt.callLater(() => {
+                if (!root.messageList || root.messages.length === 0) return
+                const lastMsg = root.messages[root.messages.length - 1]
+                if (lastMsg && lastMsg.role === "assistant") {
+                    root.messageList.positionViewAtIndex(root.messages.length - 1, ListView.Beginning)
+                } else {
+                    root.messageList.positionViewAtEnd()
+                }
+            })
         }
         function onModelsChanged() {
             root.models = JSON.parse(bridge.modelsJson)
@@ -189,14 +200,20 @@ C.ApplicationWindow {
     function sendNow() {
         if (bridge.busy) return
         if (!bridge.activeAccount) { accountDialog.open(); return }
+        const textToSend = composerInput ? composerInput.text : ""
+        const fileToSend = selectedFile
+        const rawToSend = rawOpen && rawInput ? rawInput.text : ""
+        const voiceToSend = voiceInput ? voiceInput.text : ""
+        if (!textToSend.trim() && !fileToSend && !rawToSend.trim()) return
+
         if (!bridge.chatId) startChat(selectedModel)
         bridge.chooseModel(bridge.activeAccount, selectedModel || "__auto__")
-        bridge.send(
-            composerInput ? composerInput.text : "",
-            selectedFile,
-            rawOpen && rawInput ? rawInput.text : "",
-            voiceInput ? voiceInput.text : ""
-        )
+
+        // Immediately clear input box and attachment bar so user sees instant feedback
+        if (composerInput) composerInput.text = ""
+        selectedFile = ""
+        bridge.send(textToSend, fileToSend, rawToSend, voiceToSend)
+        Qt.callLater(() => { if (root.messageList) root.messageList.positionViewAtEnd() })
     }
 
     function requestExport(messageId, fmt) {
@@ -1014,10 +1031,11 @@ C.ApplicationWindow {
                 }
             }
 
-            // Messages ListView (Fixed: NEVER override `y` on ListView delegate!)
+            // Messages ListView (Fixed: NEVER override `y` or apply FBO opacity animations on tall ListView delegates!)
             ListView {
                 id: listView
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 18
+                cacheBuffer: 16000
                 Layout.leftMargin: 24; Layout.rightMargin: 24; Layout.topMargin: 18; Layout.bottomMargin: 10
                 Component.onCompleted: root.messageList = listView
                 Component.onDestruction: if (root.messageList === listView) root.messageList = null
@@ -1030,6 +1048,7 @@ C.ApplicationWindow {
                 delegate: Item {
                     id: msgDelegate
                     required property var modelData
+                    property bool thinkingExpanded: false
                     width: ListView.view.width
                     height: bubble.implicitHeight + 6
 
@@ -1045,10 +1064,6 @@ C.ApplicationWindow {
                         color: modelData.role === "user" ? purpleSoft : card
                         border.color: modelData.role === "user" ? purple : line
                         border.width: 1
-
-                        opacity: 0
-                        Component.onCompleted: fadeAnim.start()
-                        NumberAnimation on opacity { id: fadeAnim; from: 0; to: 1; duration: 180; easing.type: Easing.OutCubic }
 
                         ColumnLayout {
                             id: bubbleColumn
@@ -1083,10 +1098,30 @@ C.ApplicationWindow {
                                     }
                                 }
                                 Item { Layout.fillWidth: true }
+                                ActionButton {
+                                    visible: modelData.role === "assistant" && !!modelData.showThinkingAllowed
+                                    implicitHeight: 22
+                                    text: msgDelegate.thinkingExpanded ? "🧠 Düşünce Sürecini Gizle ▴" : "🧠 Düşünce Sürecini Gör ▾"
+                                    onClicked: msgDelegate.thinkingExpanded = !msgDelegate.thinkingExpanded
+                                }
                                 C.Label {
                                     visible: !!modelData.created
                                     text: (modelData.created || "").slice(11, 16)
                                     color: muted; font.pixelSize: 10
+                                }
+                            }
+
+                            // Collapsible Reasoning / Thinking Box (collapsed by default so main Turkish response starts with zero gap!)
+                            Rectangle {
+                                visible: modelData.role === "assistant" && !!modelData.showThinkingAllowed && msgDelegate.thinkingExpanded
+                                Layout.fillWidth: true
+                                implicitHeight: thinkText.implicitHeight + 16
+                                radius: 10; color: purpleSoft; border.color: purple
+                                C.Label {
+                                    id: thinkText
+                                    anchors.fill: parent; anchors.margins: 8
+                                    text: modelData.thinking || ""
+                                    color: muted; font.pixelSize: 12; wrapMode: Text.WordWrap
                                 }
                             }
 
@@ -1254,12 +1289,62 @@ C.ApplicationWindow {
                     }
                 }
 
+                // Live Assistant Thinking / Processing Bubble in Chat Stream while bridge.busy is true
+                footer: Item {
+                    width: listView.width
+                    height: bridge.busy ? (thinkingBubble.implicitHeight + 24) : 12
+                    visible: bridge.busy
+
+                    Rectangle {
+                        id: thinkingBubble
+                        anchors.left: parent.left
+                        anchors.top: parent.top; anchors.topMargin: 12
+                        width: Math.min(parent.width * 0.78, 680)
+                        implicitHeight: thinkingCol.implicitHeight + 28
+                        radius: 18; color: card; border.color: purple; border.width: 2
+
+                        ColumnLayout {
+                            id: thinkingCol
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                            anchors.margins: 14; spacing: 8
+
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 10
+                                Rectangle {
+                                    width: 28; height: 28; radius: 8; color: purpleSoft
+                                    C.Label {
+                                        anchors.centerIn: parent; text: "✦"; color: purple; font.pixelSize: 15
+                                        SequentialAnimation on opacity {
+                                            running: bridge.busy; loops: Animation.Infinite
+                                            NumberAnimation { from: 1.0; to: 0.3; duration: 600 }
+                                            NumberAnimation { from: 0.3; to: 1.0; duration: 600 }
+                                        }
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 2
+                                    C.Label {
+                                        Layout.fillWidth: true
+                                        text: bridge.busyStage || "Model yanıt üretiyor…"
+                                        color: ink; font.pixelSize: 13; font.bold: true; wrapMode: Text.WordWrap
+                                    }
+                                    C.Label {
+                                        Layout.fillWidth: true
+                                        text: "İstek modele iletildi · Belge ve bağlam tam metin olarak işleniyor, lütfen bekleyin…"
+                                        color: muted; font.pixelSize: 11; wrapMode: Text.WordWrap
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Empty State Dashboard with Interactive Quick-Start Cards
                 Item {
                     anchors.centerIn: parent
                     width: Math.min(parent.width - 40, 740)
                     height: emptyCol.implicitHeight
-                    visible: messages.length === 0
+                    visible: messages.length === 0 && !bridge.busy
 
                     ColumnLayout {
                         id: emptyCol; anchors.fill: parent; spacing: 18

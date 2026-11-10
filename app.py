@@ -646,10 +646,11 @@ class Bridge(QObject):
             m["richHtml"] = render_message_html(
                 m.get("content") or "",
                 dark=self._dark_mode,
-                thinking=m.get("thinking") or "",
+                thinking="",
                 font_size=font_sz,
-                show_thinking=show_think,
+                show_thinking=False,
             )
+            m["showThinkingAllowed"] = show_think and bool((m.get("thinking") or "").strip())
             messages.append(m)
         return json.dumps(messages, ensure_ascii=False)
 
@@ -1391,6 +1392,8 @@ class Bridge(QObject):
                     model = hi_model
                     token = self._token(account["id"])
                     switched_reason = hi_reason
+                    self._busy_stage = f"⚡ {hi_reason} — Tam metin analiz ediliyor…"
+                    self.busyChanged.emit()
 
         if custom_json.strip():
             payload = json.loads(custom_json)
@@ -1527,8 +1530,50 @@ class Bridge(QObject):
         history = [dict(r) for r in rows]
         current_chat = self._chat
 
+        # Immediately save and display the user's message in the chat view & clear input bar
+        user_visible_text = prompt.strip()
+        if not user_visible_text:
+            if attachment:
+                if attachment["kind"] == "document":
+                    user_visible_text = "Belgeyi incele ve özetle."
+                elif attachment["kind"] == "image":
+                    user_visible_text = "Görseli incele ve açıkla."
+                elif attachment["kind"] == "audio":
+                    user_visible_text = "Ses kaydını yazıya çevir."
+            else:
+                user_visible_text = "JSON testi"
+
+        attached_media = ""
+        if attachment and attachment["kind"] in {"image", "audio"}:
+            media_dir = APP_DIR / "attachments"
+            media_dir.mkdir(exist_ok=True)
+            copied = media_dir / (str(uuid.uuid4()) + Path(path).suffix.lower())
+            shutil.copy2(path, copied)
+            attached_media = QUrl.fromLocalFile(str(copied)).toString() if attachment["kind"] == "image" else str(copied)
+
+        att_name = attachment["name"] if attachment else ""
+        att_text = attachment.get("text", "") if attachment and attachment["kind"] == "document" else ""
+        att_meta = json.dumps(attachment.get("meta") or {}, ensure_ascii=False) if attachment else ""
+        user_kind = "image" if (attachment and attachment["kind"] == "image") else "text"
+
+        self.db.execute(
+            "INSERT INTO messages(chat,role,content,attachment,attachment_text,attachment_meta,kind,media) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (current_chat, "user", user_visible_text, att_name, att_text, att_meta, user_kind, attached_media),
+        )
+        title_candidate = (prompt.strip() or att_name or "Yeni sohbet")[:55]
+        self.db.execute(
+            "UPDATE chats SET title=CASE WHEN title='Yeni sohbet' THEN ? ELSE title END, updated=CURRENT_TIMESTAMP WHERE id=?",
+            (title_candidate, current_chat),
+        )
+        self.db.commit()
+
         self._preview_attachment = {}
         self.previewChanged.emit()
+        self.resultReady.emit("{}")
+        self.chatsChanged.emit()
+        self.messagesChanged.emit()
+        self.artifactsChanged.emit()
 
         def work():
             if not self._models:
@@ -1581,37 +1626,7 @@ class Bridge(QObject):
                 media_path.write_bytes(base64.b64decode(result["data"]))
                 result["url"] = QUrl.fromLocalFile(str(media_path)).toString()
 
-            user_visible_text = prompt.strip()
-            if not user_visible_text:
-                if attachment:
-                    if attachment["kind"] == "document":
-                        user_visible_text = "Belgeyi incele ve özetle."
-                    elif attachment["kind"] == "image":
-                        user_visible_text = "Görseli incele ve açıkla."
-                    elif attachment["kind"] == "audio":
-                        user_visible_text = "Ses kaydını yazıya çevir."
-                else:
-                    user_visible_text = "JSON testi"
-
-            attached_media = ""
-            if attachment and attachment["kind"] in {"image", "audio"}:
-                media_dir = APP_DIR / "attachments"
-                media_dir.mkdir(exist_ok=True)
-                copied = media_dir / (str(uuid.uuid4()) + Path(path).suffix.lower())
-                shutil.copy2(path, copied)
-                attached_media = QUrl.fromLocalFile(str(copied)).toString() if attachment["kind"] == "image" else str(copied)
-
-            att_name = attachment["name"] if attachment else ""
-            att_text = attachment.get("text", "") if attachment and attachment["kind"] == "document" else ""
-            att_meta = json.dumps(attachment.get("meta") or {}, ensure_ascii=False) if attachment else ""
-            user_kind = "image" if (attachment and attachment["kind"] == "image") else "text"
-
             usage = result.get("usage") or {}
-            self.db.execute(
-                "INSERT INTO messages(chat,role,content,attachment,attachment_text,attachment_meta,kind,media) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (current_chat, "user", user_visible_text, att_name, att_text, att_meta, user_kind, attached_media),
-            )
             self.db.execute(
                 "INSERT INTO messages(chat,role,content,thinking,kind,media,model_used,auto_reason,"
                 "prompt_tokens,completion_tokens,total_tokens,neurons,elapsed_ms,truncated) "
@@ -1633,19 +1648,13 @@ class Bridge(QObject):
                     1 if result.get("truncated") else 0,
                 ),
             )
-            title_candidate = (prompt.strip() or att_name or "Yeni sohbet")[:55]
-            self.db.execute(
-                "UPDATE chats SET title=CASE WHEN title='Yeni sohbet' THEN ? ELSE title END, updated=CURRENT_TIMESTAMP WHERE id=?",
-                (title_candidate, current_chat),
-            )
             self.db.commit()
-            self.resultReady.emit(json.dumps(result, ensure_ascii=False))
             self.chatsChanged.emit()
             self.messagesChanged.emit()
             self.artifactsChanged.emit()
             self.quotaChanged.emit()
 
-        self._run(work, stage="İstek hazırlanıyor…")
+        self._run(work, stage="İstek modele gönderiliyor…")
 
     @Slot(int)
     def continueMessage(self, message_id: int):

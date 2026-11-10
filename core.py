@@ -989,6 +989,7 @@ def render_message_html(
 
     def format_inline(line_str: str) -> str:
         s = html.escape(line_str)
+        s = re.sub(r"&lt;br\s*/?&gt;", "<br>", s, flags=re.IGNORECASE)
         s = re.sub(
             r"`([^`\n]+)`",
             rf'<span style="background:{code_bg};color:{accent};font-family:monospace;padding:1px 5px;border-radius:4px;">\1</span>',
