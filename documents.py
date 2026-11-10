@@ -43,7 +43,8 @@ WIN1254_TABLE: dict[int, int] = {
 SUPPORTED_DOC_EXTENSIONS = {
     ".udf", ".pdf", ".docx", ".doc", ".rtf", ".odt",
     ".xlsx", ".csv", ".txt", ".md", ".html", ".htm",
-    ".json", ".xml", ".yaml", ".yml", ".py", ".dart", ".js", ".ts", ".sh",
+    ".json", ".xml", ".yaml", ".yml", ".py", ".dart", ".js", ".ts", ".tsx", ".jsx",
+    ".qml", ".cpp", ".c", ".h", ".rs", ".go", ".java", ".kt", ".sh", ".toml", ".sql", ".css", ".ini", ".log",
 }
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".tif", ".tiff", ".bmp"}

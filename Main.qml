@@ -10,7 +10,7 @@ C.ApplicationWindow {
     visible: true
     width: 1560; height: 950
     minimumWidth: 1120; minimumHeight: 680
-    title: "LifeOS Chat — Yapay Zekâ, UYAP Belge & Canlı Ses Stüdyosu"
+    title: "LifeOS Chat — Yapay Zekâ, Kodlama, Belge, Görsel & Canlı Ses Stüdyosu"
     font.family: "Inter, Noto Sans"
 
     readonly property bool dark: Kirigami.Theme.backgroundColor.hslLightness < 0.5
@@ -42,6 +42,7 @@ C.ApplicationWindow {
     property var appSettings: JSON.parse(bridge.settingsJson)
 
     property string selectedModel: "__auto__"
+    property string taskMode: "all" // "all" | "coding" | "document" | "vision" | "audio"
     property string selectedFile: ""
     property string filterText: ""
     property string filterModality: "Tümü"
@@ -77,15 +78,31 @@ C.ApplicationWindow {
         return true
     })
 
+    function matchesTaskMode(m, mode) {
+        if (mode === "coding") return !!m.hasCoding
+        if (mode === "document") return m.task === "text-generation" || !!m.hasVision
+        if (mode === "vision") return !!m.hasVision || !!m.hasImageOut
+        if (mode === "audio") return !!m.hasAudioIn || !!m.hasAudioOut
+        return true
+    }
+
     property var modelComboItems: {
+        const autoLabels = {
+            "all": "⚡ Otomatik Seçim (İşe Uygun Model — Kod / Belge / Görsel / Ses / Metin)",
+            "coding": "💻 Otomatik Code Modeli (Sadece Kodlama & Debug Destekli Modeller)",
+            "document": "📄 Otomatik Belge & Analiz Modeli (128K Geniş Bağlam)",
+            "vision": "🎨 Otomatik Görsel / Vision Modeli (Görsel Üret & OCR)",
+            "audio": "🎙️ Otomatik Ses Modeli (Whisper ASR & TTS)"
+        }
         const list = [{
             id: "__auto__",
-            label: "⚡ Otomatik Seçim (İşe Uygun Model — Ses / Görsel / Belge / Kod / Metin)",
-            purpose: "Gönderdiğiniz dosya (UDF, PDF, DOCX, Görsel, Ses) ve soruya göre en uygun modeli otomatik seçer.",
+            label: autoLabels[taskMode] || autoLabels["all"],
+            purpose: "Seçili çalışma moduna göre en güçlü modeli otomatik kullanır.",
             tierReason: "Akıllı Yönlendirici (Smart Router) aktif"
         }]
         for (let i = 0; i < models.length; i++) {
             const m = models[i]
+            if (!matchesTaskMode(m, taskMode)) continue
             list.push({
                 id: m.id,
                 label: m.modalityBadge + "  ·  " + m.title + "  (" + m.tier + (m.contextWindow ? " · " + m.contextWindow : "") + ")",
@@ -257,7 +274,7 @@ C.ApplicationWindow {
                     ColumnLayout {
                         spacing: 1
                         C.Label { text: "LifeOS Chat"; color: ink; font.pixelSize: 17; font.bold: true }
-                        C.Label { text: "AI · UYAP UDF · Live · MCP"; color: muted; font.pixelSize: 11 }
+                        C.Label { text: "AI · Code · Belge · Görsel · Ses · MCP"; color: muted; font.pixelSize: 11 }
                     }
                 }
 
@@ -272,10 +289,30 @@ C.ApplicationWindow {
                     text: "ÇALIŞMA ALANI"; color: muted; font.pixelSize: 10; font.bold: true
                     font.letterSpacing: 1.1; Layout.leftMargin: 8; Layout.topMargin: 4
                 }
-                NavButton { title: "Sohbet & Belge Stüdyosu"; symbol: "◉"; active: !libraryOpen; onClicked: libraryOpen = false }
+                NavButton {
+                    title: "AI Sohbet & Çalışma Alanı"
+                    symbol: "◉"
+                    active: !libraryOpen && root.taskMode !== "coding"
+                    onClicked: {
+                        libraryOpen = false
+                        root.taskMode = "all"
+                        bridge.setTaskMode("all")
+                    }
+                }
+                NavButton {
+                    title: "💻 Code & Debug Stüdyosu"
+                    symbol: "⟨/⟩"
+                    active: !libraryOpen && root.taskMode === "coding"
+                    onClicked: {
+                        libraryOpen = false
+                        root.taskMode = "coding"
+                        bridge.setTaskMode("coding")
+                        selectedModel = "__auto__"
+                    }
+                }
                 NavButton { title: "Model Kütüphanesi (" + models.length + ")"; symbol: "▦"; active: libraryOpen; onClicked: libraryOpen = true }
                 NavButton { title: "🎙️ Canlı Sesli Sohbet (Live)"; symbol: "◎"; active: bridge.liveVoiceActive; onClicked: bridge.startLiveVoiceSession() }
-                NavButton { title: "UDF / DOCX / PDF Dönüştür"; symbol: "⇄"; active: false; onClicked: converterDialog.open() }
+                NavButton { title: "Belge Dönüştür (DOCX/PDF/UDF)"; symbol: "⇄"; active: false; onClicked: converterDialog.open() }
                 NavButton { title: "Ayarlar & MCP (" + (appSettings.mcpEnabled ? "Aktif" : "Kapalı") + ")"; symbol: "⚙"; active: false; onClicked: settingsDialog.open() }
 
                 RowLayout {
@@ -421,11 +458,13 @@ C.ApplicationWindow {
                         }
                         C.Label {
                             text: libraryOpen
-                                ? models.length + " model · Ses, Görüntü, Metin ve Kodlama yeteneklerine göre gruplandı"
-                                : (selectedModel === "__auto__"
-                                    ? "⚡ Otomatik Model Seçimi aktif · UDF, DOCX, PDF, Kod/Proje, Görsel ve Canlı Ses destekli"
-                                    : (selectedModelInfo ? selectedModelInfo.modalityBadge + " · " + selectedModelInfo.purpose : "Model seçin"))
-                            color: muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.maximumWidth: 520
+                                ? models.length + " model · Kodlama, Görüntü, Ses ve Metin yeteneklerine göre gruplandı"
+                                : (root.taskMode === "coding"
+                                    ? "💻 Code & Debug Modu aktif · Sadece kodlama & hata ayıklama destekli modeller listelenir"
+                                    : (selectedModel === "__auto__"
+                                        ? "⚡ Otomatik Model Seçimi aktif · Kod/Proje, PDF, DOCX, XLSX, UDF, Görsel ve Canlı Ses destekli"
+                                        : (selectedModelInfo ? selectedModelInfo.modalityBadge + " · " + selectedModelInfo.purpose : "Model seçin")))
+                            color: root.taskMode === "coding" ? cyanAccent : muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.maximumWidth: 560
                         }
                     }
 
@@ -533,7 +572,7 @@ C.ApplicationWindow {
                                             color: modelData.category === "document" ? purpleSoft : (modelData.category === "code" ? cyanSoft : greenSoft)
                                             C.Label {
                                                 anchors.centerIn: parent
-                                                text: modelData.category === "document" ? "⚖️" : (modelData.category === "code" ? "💻" : (modelData.kind === "image" ? "🎨" : "🔊"))
+                                                text: modelData.category === "document" ? "📄" : (modelData.category === "code" ? "💻" : (modelData.kind === "image" ? "🎨" : "🔊"))
                                                 font.pixelSize: 14
                                             }
                                         }
@@ -586,7 +625,7 @@ C.ApplicationWindow {
                                         ActionButton {
                                             visible: modelData.category === "document" && !!modelData.messageId
                                             implicitHeight: 26; leftPadding: 8; rightPadding: 8
-                                            text: "⚖️ UDF"
+                                            text: "📄 UDF"
                                             onClicked: root.requestExport(modelData.messageId, "udf")
                                         }
                                         ActionButton {
@@ -989,44 +1028,80 @@ C.ApplicationWindow {
         ColumnLayout {
             spacing: 0
 
-            // Provider & Smart Model Selector Bar
+            // Provider, Task Mode & Smart Model Selector Bar
             Rectangle {
-                Layout.fillWidth: true; implicitHeight: 52; color: side
+                Layout.fillWidth: true; implicitHeight: 92; color: side
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: line }
 
-                RowLayout {
-                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22; spacing: 10
-                    C.Label { text: "HESAP"; color: muted; font.pixelSize: 10; font.bold: true }
-                    C.ComboBox {
-                        Layout.preferredWidth: 190
-                        model: accounts.map(a => a.title + " · " + (a.provider === "groq" ? "Groq" : "Cloudflare"))
-                        currentIndex: Math.max(0, accounts.findIndex(a => a.id === bridge.activeAccount))
-                        onActivated: index => { bridge.setActiveAccount(accounts[index].id); selectedModel = "__auto__" }
-                    }
-                    ActionButton { text: "＋"; onClicked: accountDialog.open() }
+                ColumnLayout {
+                    anchors.fill: parent; anchors.leftMargin: 22; anchors.rightMargin: 22; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
 
-                    C.Label { text: "MODEL SEÇİMİ"; color: muted; font.pixelSize: 10; font.bold: true; Layout.leftMargin: 6 }
-                    C.ComboBox {
-                        id: modelBox
-                        Layout.fillWidth: true
-                        model: modelComboItems.map(x => x.label)
-                        currentIndex: Math.max(0, modelComboItems.findIndex(x => x.id === selectedModel))
-                        onActivated: index => {
-                            selectedModel = modelComboItems[index].id
-                            if (bridge.chatId) bridge.chooseModel(bridge.activeAccount, selectedModel)
+                    // Row 1: Task Mode Filter Pills (All / Code & Debug / Document & Data / Vision / Audio)
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 8
+                        C.Label { text: "ÇALIŞMA MODU"; color: muted; font.pixelSize: 10; font.bold: true }
+                        Repeater {
+                            model: [
+                                { id: "all", label: "⚡ Tümü (Genel)" },
+                                { id: "coding", label: "💻 Code & Debug" },
+                                { id: "document", label: "📄 Belge & Veri" },
+                                { id: "vision", label: "🎨 Görsel & Vision" },
+                                { id: "audio", label: "🎙️ Ses & Konuşma" }
+                            ]
+                            delegate: FilterPill {
+                                required property var modelData
+                                label: modelData.label
+                                selected: root.taskMode === modelData.id
+                                onClicked: {
+                                    root.taskMode = modelData.id
+                                    bridge.setTaskMode(modelData.id)
+                                    selectedModel = "__auto__"
+                                }
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                        C.Label {
+                            visible: root.taskMode === "coding"
+                            text: "✓ Sadece kod yazma ve hata ayıklama destekli modeller aktif"
+                            color: cyanAccent; font.pixelSize: 11; font.bold: true
                         }
                     }
-                    ActionButton {
-                        text: selectedModel === "__auto__" ? "⚡ Otomatik Aktif" : "⚡ Otomatiğe Al"
-                        accentStyle: selectedModel === "__auto__"
-                        onClicked: {
-                            selectedModel = "__auto__"
-                            if (bridge.chatId) bridge.chooseModel(bridge.activeAccount, "__auto__")
+
+                    // Row 2: Account & Filtered Model Selector
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        C.Label { text: "HESAP"; color: muted; font.pixelSize: 10; font.bold: true }
+                        C.ComboBox {
+                            Layout.preferredWidth: 190
+                            model: accounts.map(a => a.title + " · " + (a.provider === "groq" ? "Groq" : "Cloudflare"))
+                            currentIndex: Math.max(0, accounts.findIndex(a => a.id === bridge.activeAccount))
+                            onActivated: index => { bridge.setActiveAccount(accounts[index].id); selectedModel = "__auto__" }
                         }
-                    }
-                    ActionButton {
-                        text: "▦ Kütüphane"
-                        onClicked: libraryOpen = true
+                        ActionButton { text: "＋"; onClicked: accountDialog.open() }
+
+                        C.Label { text: "MODEL SEÇİMİ"; color: muted; font.pixelSize: 10; font.bold: true; Layout.leftMargin: 6 }
+                        C.ComboBox {
+                            id: modelBox
+                            Layout.fillWidth: true
+                            model: modelComboItems.map(x => x.label)
+                            currentIndex: Math.max(0, modelComboItems.findIndex(x => x.id === selectedModel))
+                            onActivated: index => {
+                                selectedModel = modelComboItems[index].id
+                                if (bridge.chatId) bridge.chooseModel(bridge.activeAccount, selectedModel)
+                            }
+                        }
+                        ActionButton {
+                            text: selectedModel === "__auto__" ? "⚡ Otomatik Aktif" : "⚡ Otomatiğe Al"
+                            accentStyle: selectedModel === "__auto__"
+                            onClicked: {
+                                selectedModel = "__auto__"
+                                if (bridge.chatId) bridge.chooseModel(bridge.activeAccount, "__auto__")
+                            }
+                        }
+                        ActionButton {
+                            text: "▦ Kütüphane"
+                            onClicked: libraryOpen = true
+                        }
                     }
                 }
             }
@@ -1137,7 +1212,7 @@ C.ApplicationWindow {
                                         width: 36; height: 36; radius: 9; color: purpleSoft
                                         C.Label {
                                             anchors.centerIn: parent
-                                            text: (modelData.attachment || "").toLowerCase().endsWith(".udf") ? "⚖️" : "📄"
+                                            text: "📄"
                                             font.pixelSize: 18
                                         }
                                     }
@@ -1266,7 +1341,7 @@ C.ApplicationWindow {
                                 }
                                 ActionButton {
                                     implicitHeight: 28
-                                    text: "⚖️ UDF İndir"
+                                    text: "📄 UDF"
                                     onClicked: root.requestExport(modelData.id, "udf")
                                 }
                                 ActionButton {
@@ -1359,7 +1434,9 @@ C.ApplicationWindow {
                             Layout.fillWidth: true
                             text: accounts.length === 0
                                 ? "Başlamak için Cloudflare Workers AI veya Groq hesabınızı ekleyin."
-                                : "⚡ Otomatik Model Seçimi aktif. UYAP (.udf), Word (.docx), PDF, Excel, Görsel veya Canlı Ses kullanabilirsiniz."
+                                : (root.taskMode === "coding"
+                                    ? "💻 Code & Debug Modu aktif · Kod yazma, hata ayıklama (debug), refactoring ve çok dosyalı proje üretimi için hazır."
+                                    : "⚡ Otomatik Model Seçimi aktif · Kodlama & Debug, Belge/Veri (PDF, DOCX, XLSX, UDF), Görsel Üretim ve Canlı Ses kullanabilirsiniz.")
                             color: muted; font.pixelSize: 13; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
                         }
 
@@ -1368,36 +1445,40 @@ C.ApplicationWindow {
                             Repeater {
                                 model: [
                                     {
-                                        icon: "⚖️",
-                                        title: "UYAP (.udf) / PDF Evrak Analizi",
-                                        desc: "Dava dilekçesi, bilirkişi raporu veya mahkeme kararını ekleyip özetletin, e-imzasını doğrulayın.",
-                                        prompt: "Eklediğim hukuki evrakı (UDF/PDF/DOCX) detaylıca incele; tarafları, talepleri, önemli tarihleri ve hukuki sonuçları maddeler halinde özetle.",
-                                        pickFile: true,
-                                        liveVoice: false
+                                        icon: "💻",
+                                        title: "Code & Hata Ayıklama (Debug)",
+                                        desc: "Sadece kodlama destekli modellerle kod yazın, stack trace / hata ayıklayın, algoritmaları optimize edin.",
+                                        prompt: "Aşağıdaki kodda veya hata çıktısında (stack trace) kök nedeni bul, hatayı açıkla ve düzeltilmiş tam kodu yaz:\n\n",
+                                        pickFile: false,
+                                        liveVoice: false,
+                                        mode: "coding"
                                     },
                                     {
-                                        icon: "✍️",
-                                        title: "Dilekçe Yaz & UYAP (.udf) Oluştur",
-                                        desc: "Yanıtı hazırlatıp sağ panelden tek tıkla doğrudan UYAP Editör uyumlu .udf, .docx veya .pdf olarak kaydedin.",
-                                        prompt: "Aşağıdaki konu hakkında resmi mahkeme formatına uygun, başlıkları ve sonuç-istem bölümü tam bir dilekçe taslağı hazırla: ",
+                                        icon: "📁",
+                                        title: "Çok Dosyalı Proje & Uygulama Üret",
+                                        desc: "Üretilen tüm kod dosyaları sağ panelde listelenir ve tek tıkla proje klasörüne çıkarılır.",
+                                        prompt: "Bana şu özelliklere sahip tam çalışan, temiz mimarili bir proje üret (her dosyayı ```dil dosya_adi şeklinde yaz): ",
                                         pickFile: false,
-                                        liveVoice: false
+                                        liveVoice: false,
+                                        mode: "coding"
+                                    },
+                                    {
+                                        icon: "📄",
+                                        title: "Belge, Tablo & Rapor Analizi",
+                                        desc: "PDF, Word (.docx), Excel (.xlsx), Markdown veya UDF dosyalarını tam metin olarak inceletin ve raporlatın.",
+                                        prompt: "Eklediğim belgeyi/veriyi detaylıca incele; ana bulguları, kritik noktaları ve özet tabloyu kapsamlı şekilde çıkar.",
+                                        pickFile: true,
+                                        liveVoice: false,
+                                        mode: "document"
                                     },
                                     {
                                         icon: "🎙️",
-                                        title: "Canlı Sesli Sohbet (Gemini Live)",
+                                        title: "Canlı Sesli Sohbet (Live)",
                                         desc: "Yazmadan doğrudan mikrofona konuşun; asistan sizi dinlesin ve sesli olarak yanıtlasın.",
                                         prompt: "",
                                         pickFile: false,
-                                        liveVoice: true
-                                    },
-                                    {
-                                        icon: "💻",
-                                        title: "Kod & Çok Dosyalı Proje Üret",
-                                        desc: "Üretilen tüm kod dosyaları sağ panelde listelenir ve tek tıkla proje klasörüne çıkarılır.",
-                                        prompt: "Bana şu özelliklere sahip tam çalışan bir proje üret (her dosyayı ```dil dosya_adi şeklinde yaz): ",
-                                        pickFile: false,
-                                        liveVoice: false
+                                        liveVoice: true,
+                                        mode: "audio"
                                     }
                                 ]
                                 delegate: Rectangle {
@@ -1421,6 +1502,11 @@ C.ApplicationWindow {
                                     HoverHandler { id: qHover; cursorShape: Qt.PointingHandCursor }
                                     TapHandler {
                                         onTapped: {
+                                            if (modelData.mode) {
+                                                root.taskMode = modelData.mode
+                                                bridge.setTaskMode(modelData.mode)
+                                                selectedModel = "__auto__"
+                                            }
                                             if (modelData.liveVoice) {
                                                 bridge.startLiveVoiceSession()
                                                 return
@@ -1484,12 +1570,41 @@ C.ApplicationWindow {
                         }
                     }
 
+                    // Code & Debug Quick Actions Toolbar (visible when Code mode is active)
+                    RowLayout {
+                        visible: root.taskMode === "coding"
+                        Layout.fillWidth: true; spacing: 6
+                        C.Label { text: "💻 Hızlı Kod Araçları:"; color: cyanAccent; font.pixelSize: 11; font.bold: true }
+                        Repeater {
+                            model: [
+                                { label: "🐞 Hata Ayıkla (Debug)", prefix: "Aşağıdaki kodda/hata çıktısında kök nedeni analiz et, hatayı açıkla ve düzeltilmiş tam çalışan kodu ver:\n\n" },
+                                { label: "⚡ Refactor & Optimize Et", prefix: "Aşağıdaki kodu performans, okunabilirlik ve temiz mimari (Clean Code) açısından refactor et:\n\n" },
+                                { label: "🧪 Unit Test Yaz", prefix: "Aşağıdaki kod/modül için uç durumları (edge-cases) kapsayan kapsamlı birim testleri (unit tests) yaz:\n\n" },
+                                { label: "📐 Mimari & Güvenlik İncele", prefix: "Aşağıdaki kodu güvenlik açıkları, bellek/performans darboğazları ve mimari açıdan incele:\n\n" },
+                                { label: "📁 Çok Dosyalı Proje Üret", prefix: "Şu gereksinimlere göre tam çalışan çok dosyalı bir proje üret (her dosyayı ```dil dosya_adi formatında yaz):\n\n" }
+                            ]
+                            delegate: ActionButton {
+                                required property var modelData
+                                implicitHeight: 26; leftPadding: 9; rightPadding: 9
+                                text: modelData.label
+                                onClicked: {
+                                    promptBox.text = modelData.prefix + promptBox.text
+                                    promptBox.forceActiveFocus()
+                                    promptBox.cursorPosition = promptBox.text.length
+                                }
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
                     C.TextArea {
                         id: promptBox
                         Layout.fillWidth: true; Layout.preferredHeight: 78
                         placeholderText: selectedModelInfo && selectedModelInfo.category.includes("Embedding")
                             ? "Vektöre dönüştürülecek metni yazın…"
-                            : "Mesajınızı yazın...  UYAP (.udf), PDF, Word (.docx/.doc), RTF, Excel (.xlsx), Görsel ekleyebilir veya Canlı Ses başlatabilirsiniz"
+                            : (root.taskMode === "coding"
+                                ? "Kodunuzu, hata çıktısını (stack trace) veya yazılmasını istediğiniz algoritmayı/projeyi buraya yapıştırın…"
+                                : "Mesajınızı yazın...  Kod/Proje, PDF, Word (.docx), Excel (.xlsx), UDF, Görsel ekleyebilir veya Canlı Ses başlatabilirsiniz")
                         color: ink; font.pixelSize: appSettings.fontSize || 14; wrapMode: TextEdit.Wrap
                         background: Rectangle { color: "transparent" }
                         Component.onCompleted: root.composerInput = promptBox
@@ -1505,7 +1620,7 @@ C.ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true; spacing: 8
                         ActionButton {
-                            text: "📎  Dosya / UDF Ekle"
+                            text: "📎  Dosya / Kod / Belge Ekle"
                             onClicked: filePicker.open()
                         }
                         ActionButton {
@@ -1562,10 +1677,11 @@ C.ApplicationWindow {
     // ======================== FILE & FOLDER DIALOGS ========================
     FileDialog {
         id: filePicker
-        title: "Sohbete Belge (UDF/PDF/DOCX/XLSX), Görsel veya Ses Ekle"
+        title: "Sohbete Kod, Belge (PDF/DOCX/XLSX/UDF), Görsel veya Ses Ekle"
         nameFilters: [
-            "Tüm Desteklenenler (*.udf *.pdf *.docx *.doc *.rtf *.odt *.xlsx *.csv *.txt *.md *.html *.json *.png *.jpg *.jpeg *.webp *.gif *.tif *.tiff *.wav *.mp3 *.m4a *.ogg *.flac *.webm)",
-            "UYAP ve Ofis Belgeleri (*.udf *.pdf *.docx *.doc *.rtf *.odt *.xlsx *.csv)",
+            "Tüm Desteklenenler (*.py *.js *.ts *.tsx *.jsx *.qml *.cpp *.c *.h *.rs *.go *.java *.kt *.dart *.sh *.yaml *.yml *.toml *.sql *.css *.udf *.pdf *.docx *.doc *.rtf *.odt *.xlsx *.csv *.txt *.md *.html *.json *.png *.jpg *.jpeg *.webp *.gif *.tif *.tiff *.wav *.mp3 *.m4a *.ogg *.flac *.webm)",
+            "Kod & Proje Dosyaları (*.py *.js *.ts *.tsx *.jsx *.qml *.cpp *.c *.h *.rs *.go *.java *.kt *.dart *.sh *.yaml *.yml *.toml *.sql *.css *.json *.md)",
+            "Ofis, Veri & UDF Belgeleri (*.pdf *.docx *.doc *.rtf *.odt *.xlsx *.csv *.udf *.txt *.html)",
             "Görseller (*.png *.jpg *.jpeg *.webp *.gif *.tif *.tiff)",
             "Ses Dosyaları (*.wav *.mp3 *.m4a *.ogg *.flac *.webm)",
             "Tüm Dosyalar (*)"
@@ -1738,7 +1854,7 @@ C.ApplicationWindow {
                 id: sysPromptField
                 Layout.fillWidth: true; Layout.preferredHeight: 68
                 text: appSettings.systemPrompt || ""
-                placeholderText: "Boş bırakılırsa varsayılan Türkçe hukuk/belge/kod uzman talimatı kullanılır."
+                placeholderText: "Boş bırakılırsa seçili çalışma moduna (Genel, Code & Debug, Belge, Görsel, Ses) uygun uzman sistem talimatı kullanılır."
                 color: ink; font.pixelSize: 12; wrapMode: TextEdit.Wrap
                 background: Rectangle { color: card2; radius: 10; border.color: line }
             }

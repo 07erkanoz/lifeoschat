@@ -147,7 +147,11 @@ def model_modalities(task: str, badges: list[str], name: str) -> dict:
     has_audio_out = task == "text-to-speech" or any(k in lower for k in ("aura", "melotts", "orpheus", "playai", "tts"))
     has_image_out = task == "text-to-image"
     has_reasoning = "Derin düşünme" in badges or any(k in lower for k in ("qwq", "r1", "reason", "thinking", "gpt-oss"))
-    has_coding = any(k in lower for k in ("coder", "codestral", "code", "starcoder", "deepseek"))
+    is_dedicated_coder = any(k in lower for k in ("coder", "codestral", "code", "starcoder"))
+    has_coding = is_dedicated_coder or any(
+        k in lower
+        for k in ("deepseek", "gpt-oss", "qwen3", "qwq", "llama-3.3-70b", "llama-4-scout", "gemma-4-26b", "mistral-small-3.1", "nemotron")
+    )
     has_tools = "Araç çağırma" in badges or any(k in lower for k in ("llama-3.3", "llama-3.1", "qwen", "gpt-oss", "mistral", "gemma-3"))
 
     inputs: list[str] = []
@@ -170,11 +174,15 @@ def model_modalities(task: str, badges: list[str], name: str) -> dict:
         outputs = ["🔢 Vektör"]
         modality_badge = "📝 Metin → 🔢 Vektör"
     elif has_vision:
-        inputs = ["📝 Metin", "🖼️ Görsel", "📄 Belge/UDF"]
+        inputs = ["📝 Metin", "🖼️ Görsel", "📄 Belge"]
         outputs = ["📝 Metin"]
         modality_badge = "🖼️ Görsel + 📝 Metin → 📝 Metin"
+    elif has_coding:
+        inputs = ["💻 Kod", "📝 Metin", "📄 Dosya"]
+        outputs = ["💻 Kod", "📝 Metin"]
+        modality_badge = "💻 Kod + 📝 Metin → 💻 Çözüm"
     else:
-        inputs = ["📝 Metin", "📄 Belge/UDF"]
+        inputs = ["📝 Metin", "📄 Belge"]
         outputs = ["📝 Metin"]
         modality_badge = "📝 Metin + 📄 Belge → 📝 Metin"
 
@@ -197,6 +205,7 @@ def model_modalities(task: str, badges: list[str], name: str) -> dict:
         "hasImageOut": has_image_out,
         "hasReasoning": has_reasoning,
         "hasCoding": has_coding,
+        "isDedicatedCoder": is_dedicated_coder,
         "hasTools": has_tools,
         "contextWindow": context_window,
     }
@@ -214,10 +223,12 @@ def model_group(task: str, tier: str, mod: dict) -> str:
     if task in {"image-to-text", "image-text-to-text"} or (mod["hasVision"] and task in CHAT_TASKS):
         return "🖼️ Görsel Anlama & OCR (Görüntü → Metin)"
     if task == "text-generation":
+        if mod.get("isDedicatedCoder"):
+            return "💻 Kodlama & Teknik (Metin)"
         if mod["hasReasoning"]:
             return "🧠 Derin Düşünme & Analiz (Metin)"
-        if mod["hasCoding"]:
-            return "💻 Kodlama & Teknik (Metin)"
+        if mod["hasCoding"] and tier == "Güçlü":
+            return "⚡ Güçlü Sohbet & Belge (Metin)"
         if tier == "Güçlü":
             return "⚡ Güçlü Sohbet & Belge (Metin)"
         return "💬 Dengeli & Hızlı Sohbet (Metin)"
@@ -234,15 +245,15 @@ def model_purpose(task: str, badges: list[str], name: str, mod: dict | None = No
     if task == "text-to-speech" or (mod and mod.get("hasAudioOut")):
         return "Yazıyı doğal sesli konuşmaya dönüştürür (Canlı Sesli Sohbet uyumlu)."
     if mod and mod.get("hasVision"):
-        return "Resim, ekran görüntüsü, taranmış PDF ve belgeleri okur ve yorumlar."
+        return "Resim, ekran görüntüsü ve taranmış belgeleri okur ve yorumlar."
     if task in {"image-to-text", "image-text-to-text"}:
         return "Resim ve ekran görüntüsü yorumlar; destekliyorsa OCR yapar."
     if task == "text-generation":
         if "coder" in name.lower() or "code" in name.lower():
-            return "Kod yazma, proje üretimi, hata ayıklama ve teknik mimari için uzman model."
+            return "Kod yazma, proje üretimi, hata ayıklama (debug) ve yazılım mimarisi için uzman model."
         if "Derin düşünme" in badges:
-            return "Adım adım mantık yürütme, karmaşık hukuk/belge analizi ve derin muhakeme."
-        return "Günlük sohbet, dilekçe/belge üretimi ve UDF/PDF/DOCX analizi."
+            return "Adım adım mantık yürütme, kod/algoritma geliştirme ve kapsamlı veri/belge analizi."
+        return "Genel sohbet, araştırma, kodlama, içerik üretimi ve belge inceleme."
     return TASKS.get(task, ("", "Modelin özel giriş biçimiyle test edin."))[1]
 
 
@@ -360,17 +371,20 @@ def select_best_model(
             if hit:
                 return hit["id"], f"Hızlı yanıt için {hit['title']} seçildi"
 
-    # 6. Coding / technical / project generation request
+    # 6. Coding / debugging / software architecture / project generation request
     code_triggers = (
-        "kod ", "proje ", "uygulama yaz", "python", "javascript", "flutter", "dart", "html",
-        "sql", "regex", "fonksiyon", "bug", "hata", "script", "```", "class ", "def ",
+        "kod ", "proje ", "uygulama yaz", "python", "javascript", "typescript", "flutter", "dart", "html",
+        "css", "sql", "regex", "fonksiyon", "bug", "hata", "debug", "refactor", "script", "```", "class ", "def ",
     )
     if preferred_task == "coding" or any(t in p_low for t in code_triggers):
         coders = [m for m in chat_models if m.get("hasCoding")]
-        for pref in ("qwen-2.5-coder-32b", "qwen2.5-coder", "qwen3-32b", "deepseek", "llama-3.3-70b", "gpt-oss-120b"):
+        for pref in (
+            "qwen-2.5-coder-32b", "qwen2.5-coder", "qwen3-32b", "qwen3.8-27b", "qwen3-30b",
+            "qwq-32b", "deepseek", "llama-3.3-70b", "gpt-oss-120b", "gpt-oss-20b",
+        ):
             hit = next((m for m in chat_models if pref in m["id"].lower()), None)
             if hit:
-                return hit["id"], f"Kodlama ve proje üretimi için {hit['title']} seçildi"
+                return hit["id"], f"Kodlama ve hata ayıklama için {hit['title']} seçildi"
         if coders:
             return coders[0]["id"], f"Kodlama görevi için {coders[0]['title']} seçildi"
 
@@ -618,20 +632,31 @@ def conversation_payload(
     system_prompt: str = "",
     max_doc_chars: int = 250000,
     max_history_chars: int = 120000,
+    task_mode: str = "all",
 ) -> dict:
     """Builds the chat completion payload without polluting UI bubbles with raw document text, and fits within model token budgets."""
     history: list[dict] = []
-    default_sys = (
-        system_prompt.strip()
-        or "Sen LifeOS Chat yapay zekâ ve belge stüdyosu asistanısın. Yanıtlarını açık, doğru, iyi yapılandırılmış "
-           "Markdown biçiminde ve Türkçe olarak ver.\n"
-           "- Kullanıcı bir belge (UDF, PDF, DOCX, XLSX vb.) eklediğinde belge içeriğini dikkatle analiz et.\n"
-           "- Kullanıcı senden bir dilekçe, sözleşme, rapor veya resmi evrak oluşturmanı isterse başlıkları ve maddeleri tam, "
-           "doğrudan UYAP (.udf) / Word (.docx) / PDF olarak indirilebilecek temizlikte yaz.\n"
-           "- Kullanıcı bir kod veya çok dosyalı proje isterse her kod bloğunun başına dosya adını ```dil dosya_adi.uzanti "
-           "(örneğin ```python main.py veya ```html index.html) biçiminde yaz ki Sağ Çalışma Alanı panelinde proje dosyası olarak listelensin.\n"
-           "- Cevabını asla yarıda kesme."
-    )
+    if system_prompt.strip():
+        default_sys = system_prompt.strip()
+    elif task_mode == "coding":
+        default_sys = (
+            "Sen LifeOS Chat Kıdemli Yazılım Mühendisi ve Hata Ayıklama (Debugging) uzmanısın. "
+            "Yanıtlarını açık, temiz ve eksiksiz olarak Türkçe ver.\n"
+            "- Kod yazarken veya hata ayıklarken kök nedeni net biçimde açıkla, temiz ve üretime hazır (production-ready) kod üret.\n"
+            "- Her kod bloğunun başına dosya adını ```dil dosya_adi.uzanti (örneğin ```python main.py, ```javascript app.js, ```qml Main.qml) "
+            "biçiminde yaz ki Sağ Çalışma Alanı panelinde doğrudan proje dosyası olarak listelensin ve indirilebilsin.\n"
+            "- Kodu asla yarıda kesme veya '// geri kalanı aynı' şeklinde eksik bırakma."
+        )
+    else:
+        default_sys = (
+            "Sen LifeOS Chat çok amaçlı yapay zekâ çalışma alanı asistanısın. Yanıtlarını açık, doğru, iyi yapılandırılmış "
+            "Markdown biçiminde ve Türkçe olarak ver.\n"
+            "- Kullanıcı bir dosya (PDF, Word, Excel, Kod dosyası, UDF, Görsel vb.) eklediğinde içeriğini eksiksiz analiz et.\n"
+            "- Kullanıcı bir kod veya çok dosyalı proje isterse her kod bloğunun başına dosya adını ```dil dosya_adi.uzanti "
+            "(örneğin ```python main.py veya ```html index.html) biçiminde yaz.\n"
+            "- Kullanıcı bir rapor, makale veya resmi belge oluşturmanı isterse başlıkları ve tabloları düzenli Markdown olarak hazırla.\n"
+            "- Cevabını asla yarıda kesme."
+        )
     history.append({"role": "system", "content": default_sys})
 
     recent_msgs: list[dict] = []

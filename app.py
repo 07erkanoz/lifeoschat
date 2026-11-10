@@ -215,6 +215,7 @@ class Bridge(QObject):
         self._live_transcript = ""
         self._live_reply = ""
         self._dark_mode = True
+        self._task_mode = "all"
 
     def _init_db(self) -> None:
         self.db.execute(
@@ -442,6 +443,10 @@ class Bridge(QObject):
         if self._dark_mode != dark:
             self._dark_mode = dark
             self.messagesChanged.emit()
+
+    @Slot(str)
+    def setTaskMode(self, mode: str):
+        self._task_mode = mode or "all"
 
     @Slot()
     def toggleRecording(self):
@@ -1407,6 +1412,7 @@ class Bridge(QObject):
                 system_prompt=sys_prompt,
                 max_doc_chars=250000,
                 max_history_chars=120000,
+                task_mode=self._task_mode,
             )
             payload["model"] = model
         elif task in CHAT_TASKS:
@@ -1419,6 +1425,7 @@ class Bridge(QObject):
                 system_prompt=sys_prompt,
                 max_doc_chars=250000,
                 max_history_chars=120000,
+                task_mode=self._task_mode,
             )
             if task == "image-to-text" and attachment and attachment["kind"] == "image":
                 payload = {
@@ -1584,8 +1591,9 @@ class Bridge(QObject):
             actual_model = selected_model
             exec_account = account
 
+            pref_task = self._task_mode if self._task_mode != "all" else ""
             if selected_model in (AUTO_MODEL_ID, "auto", "") or not any(m["id"] == selected_model for m in self._models):
-                actual_model, auto_reason = select_best_model(self._models, prompt, attachment)
+                actual_model, auto_reason = select_best_model(self._models, prompt, attachment, preferred_task=pref_task)
                 # Cross-account smart fallback: e.g., user asked for image generation on Groq -> use Cloudflare account if available
                 p_low = (prompt or "").lower()
                 wants_img = not attachment and any(t in p_low for t in ("resim çiz", "görsel üret", "görsel oluştur", "resim oluştur", "fotoğraf üret"))
