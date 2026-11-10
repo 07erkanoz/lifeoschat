@@ -343,8 +343,11 @@ def select_best_model(
 
     chat_models = [
         m for m in models
-        if m["task"] == "text-generation"
-        and not any(x in m["id"].lower() for x in ("-lora", "-guard", "apertus", "clef", "clairic", "moderation", "safeguard"))
+        if (m["task"] == "text-generation" or "llama-4-scout" in m["id"].lower())
+        and not any(
+            x in m["id"].lower()
+            for x in ("-lora", "-guard", "apertus", "clef", "clairic", "moderation", "safeguard", "deepseek-v4", "kimi-k2")
+        )
     ]
     if not chat_models:
         fallback = default_chat_model(models)
@@ -543,7 +546,7 @@ def normalize_groq_model(item: dict) -> dict:
     return model
 
 
-def extract_document(path: str, limit: int = 80000) -> str:
+def extract_document(path: str, limit: int = 250000) -> str:
     return extract_document_full(path, limit=limit).text
 
 
@@ -613,8 +616,8 @@ def conversation_payload(
     max_tokens: int = 4096,
     temperature: float = 0.6,
     system_prompt: str = "",
-    max_doc_chars: int = 24000,
-    max_history_chars: int = 10000,
+    max_doc_chars: int = 250000,
+    max_history_chars: int = 120000,
 ) -> dict:
     """Builds the chat completion payload without polluting UI bubbles with raw document text, and fits within model token budgets."""
     history: list[dict] = []

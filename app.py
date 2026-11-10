@@ -1279,7 +1279,7 @@ class Bridge(QObject):
                     "badge": f"🎙️ Ses Kaydı · {suffix.lstrip('.').upper()} · {size_kb} KB",
                 },
             }
-        extracted = extract_document_full(path, limit=80000)
+        extracted = extract_document_full(path, limit=250000)
         return {
             "kind": "document",
             "name": extracted.name,
@@ -1289,6 +1289,48 @@ class Bridge(QObject):
             "rendered_pages": extracted.rendered_pages,
             "meta": extracted.to_meta_dict(),
         }
+
+    def _find_high_context_128k_model(self, required_tokens: int, prompt: str = "", attachment: dict | None = None) -> tuple[dict | None, str, str]:
+        """Finds a model across all accounts that can process the ENTIRE document (128K context) without any truncation."""
+        # 1. Check if any Groq account has a model with TPM >= required_tokens + 2000
+        for acc in self._accounts:
+            if acc["provider"] == "groq":
+                try:
+                    ms = self._fetch_models_for_account(acc)
+                    for m in ms:
+                        if m["task"] in CHAT_TASKS:
+                            tpm = (m.get("limits") or get_groq_model_limits(m["id"])).get("tpm") or 8000
+                            if tpm >= required_tokens + 2000:
+                                return acc, m["id"], f"Yüksek bağlam ({tpm:,} TPM) için {m['title']} seçildi"
+                except Exception:
+                    continue
+
+        # 2. Switch to Cloudflare 128K context models (which have NO 8,000 TPM per-minute burst cap and support full 128K tokens)
+        for acc in self._accounts:
+            if acc["provider"] == "cloudflare":
+                try:
+                    ms = self._fetch_models_for_account(acc)
+                    for pref in (
+                        "@cf/openai/gpt-oss-120b",
+                        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                        "@cf/qwen/qwen3-30b-a3b-fp8",
+                        "@cf/qwen/qwq-32b",
+                        "@cf/qwen/qwen3.8-27b",
+                        "@cf/meta/llama-4-scout-17b-16e-instruct",
+                    ):
+                        hit = next((m for m in ms if m["id"].lower() == pref), None)
+                        if hit:
+                            return (
+                                acc,
+                                hit["id"],
+                                f"Tam metin ({required_tokens:,} token) için 128K bağlamlı {hit['title']} ({acc['title']}) modeline otomatik geçildi",
+                            )
+                    m_id, _ = select_best_model(ms, prompt, attachment)
+                    if m_id:
+                        return acc, m_id, f"Tam metin ({required_tokens:,} token) için 128K bağlamlı {m_id.split('/')[-1]} modeline otomatik geçildi"
+                except Exception:
+                    continue
+        return None, "", ""
 
     def _execute_model_call(
         self,
@@ -1307,6 +1349,7 @@ class Bridge(QObject):
         max_tok = int(self.settings.value("maxTokens", 4096))
         temp = float(self.settings.value("temperature", 0.6))
         sys_prompt = system_prompt.strip() or str(self.settings.value("systemPrompt", "")).strip()
+        switched_reason = ""
 
         if attachment and attachment["kind"] == "audio" and task != "automatic-speech-recognition" and not custom_json.strip():
             asr_acc, asr_model = self._find_best_account_and_model("automatic-speech-recognition", prompt, attachment, preferred_account=account)
@@ -1333,29 +1376,34 @@ class Bridge(QObject):
             prompt = f"{prompt.strip()}\n\n[Ses Kaydı Deşifresi ({attachment['name']})]:\n{transcript}"
             attachment = None
 
+        # Pre-check: if the full uncut document + conversation exceeds Groq's per-minute TPM cap (8,000 tokens),
+        # automatically route to a 128K full-context model BEFORE sending so zero text is ever cut!
+        if account["provider"] == "groq" and task in CHAT_TASKS and not custom_json.strip():
+            doc_str = attachment.get("text", "") if (attachment and attachment.get("kind") == "document") else ""
+            hist_str = " ".join((m.get("content") or "") + " " + (m.get("attachment_text") or "") for m in history[-10:])
+            est_input_tok = estimate_tokens(prompt + " " + doc_str + " " + hist_str)
+            limits = get_groq_model_limits(model)
+            tpm_cap = limits.get("tpm") or 8000
+            if est_input_tok + 1200 > tpm_cap:
+                hi_acc, hi_model, hi_reason = self._find_high_context_128k_model(est_input_tok, prompt, attachment)
+                if hi_acc and hi_model:
+                    account = hi_acc
+                    model = hi_model
+                    token = self._token(account["id"])
+                    switched_reason = hi_reason
+
         if custom_json.strip():
             payload = json.loads(custom_json)
         elif account["provider"] == "groq":
-            limits = get_groq_model_limits(model)
-            tpm_budget = limits.get("tpm") or 8000
-            rl = self._rate_limits.get(account["id"], {})
-            rem_tok = int(rl.get("remaining_tokens", tpm_budget) or tpm_budget)
-            effective_tpm = max(2500, min(tpm_budget, rem_tok if rem_tok > 1200 else tpm_budget))
-            # Fit input document + history + max_tokens safely within Groq's per-minute TPM cap
-            has_large_doc = bool(attachment and attachment.get("kind") == "document" and len(attachment.get("text") or "") > 6000)
-            req_max_tok = min(max_tok, 2048 if (has_large_doc and effective_tpm <= 10000) else max_tok)
-            input_tok_budget = max(1800, effective_tpm - min(req_max_tok, 1800) - 400)
-            doc_char_budget = max(4500, int(input_tok_budget * 2.5))
-            hist_char_budget = max(1500, int(input_tok_budget * 0.7))
             payload = conversation_payload(
                 history,
                 prompt,
                 attachment,
-                max_tokens=req_max_tok,
+                max_tokens=max_tok,
                 temperature=temp,
                 system_prompt=sys_prompt,
-                max_doc_chars=doc_char_budget,
-                max_history_chars=hist_char_budget,
+                max_doc_chars=250000,
+                max_history_chars=120000,
             )
             payload["model"] = model
         elif task in CHAT_TASKS:
@@ -1366,8 +1414,8 @@ class Bridge(QObject):
                 max_tokens=max_tok,
                 temperature=temp,
                 system_prompt=sys_prompt,
-                max_doc_chars=32000,
-                max_history_chars=12000,
+                max_doc_chars=250000,
+                max_history_chars=120000,
             )
             if task == "image-to-text" and attachment and attachment["kind"] == "image":
                 payload = {
@@ -1411,54 +1459,27 @@ class Bridge(QObject):
             except ValueError as err:
                 err_str = str(err)
                 if account["provider"] == "groq" and ("HTTP 413" in err_str or "HTTP 429" in err_str or "too large" in err_str.lower()):
-                    # Automatic fallback 1: Compact document & history tightly so it fits even a partially-used 6k/8k TPM window
-                    compact_payload = conversation_payload(
-                        history[-4:],
-                        prompt,
-                        attachment,
-                        max_tokens=1536,
-                        temperature=temp,
-                        system_prompt=sys_prompt,
-                        max_doc_chars=7500,
-                        max_history_chars=1500,
-                    )
-                    compact_payload["model"] = model
-                    try:
-                        data, mime, resp_headers = request_with_headers(url, token, compact_payload)
-                    except ValueError:
-                        # Automatic fallback 2: Switch to a Cloudflare account if registered (no 8k TPM burst cap), or ultra-compact on Groq
-                        cf_acc = next((a for a in self._accounts if a["provider"] == "cloudflare"), None)
-                        if cf_acc:
-                            cf_tok = self._token(cf_acc["id"])
-                            cf_models = self._fetch_models_for_account(cf_acc)
-                            cf_model_id, _ = select_best_model(cf_models, prompt, attachment)
-                            cf_payload = conversation_payload(
-                                history[-6:],
-                                prompt,
-                                attachment,
-                                max_tokens=2048,
-                                temperature=temp,
-                                system_prompt=sys_prompt,
-                                max_doc_chars=24000,
-                                max_history_chars=6000,
-                            )
-                            cf_url = f"{API}/accounts/{cf_acc['accountId']}/ai/run/{cf_model_id}"
-                            data, mime, resp_headers = request_with_headers(cf_url, cf_tok, cf_payload)
-                            account = cf_acc
-                            model = cf_model_id
-                        else:
-                            ultra_payload = conversation_payload(
-                                [],
-                                prompt,
-                                attachment,
-                                max_tokens=1024,
-                                temperature=temp,
-                                system_prompt=sys_prompt,
-                                max_doc_chars=4500,
-                                max_history_chars=0,
-                            )
-                            ultra_payload["model"] = model
-                            data, mime, resp_headers = request_with_headers(url, token, ultra_payload)
+                    # Immediately switch to a 128K full-context Cloudflare model with the FULL uncut document
+                    hi_acc, hi_model, hi_reason = self._find_high_context_128k_model(12000, prompt, attachment)
+                    if hi_acc and hi_model and hi_acc["provider"] == "cloudflare":
+                        cf_tok = self._token(hi_acc["id"])
+                        cf_payload = conversation_payload(
+                            history,
+                            prompt,
+                            attachment,
+                            max_tokens=max_tok,
+                            temperature=temp,
+                            system_prompt=sys_prompt,
+                            max_doc_chars=250000,
+                            max_history_chars=120000,
+                        )
+                        cf_url = f"{API}/accounts/{hi_acc['accountId']}/ai/run/{hi_model}"
+                        data, mime, resp_headers = request_with_headers(cf_url, cf_tok, cf_payload)
+                        account = hi_acc
+                        model = hi_model
+                        switched_reason = hi_reason
+                    else:
+                        raise
                 else:
                     raise
 
@@ -1467,6 +1488,10 @@ class Bridge(QObject):
             result = parse_response(data, "image/png" if task == "text-to-image" else "audio/wav", prompt_est_str, task, model_id=model)
         else:
             result = parse_response(data, mime, prompt_est_str, task, model_id=model)
+
+        result["model_used"] = model.split("/")[-1]
+        if switched_reason:
+            result["switched_reason"] = switched_reason
 
         self._record_usage_and_headers(account, model, result.get("usage", {}), resp_headers)
         elapsed_ms = (time.monotonic() - t0) * 1000.0
@@ -1598,8 +1623,8 @@ class Bridge(QObject):
                     result.get("thinking", ""),
                     result["kind"],
                     result.get("url", ""),
-                    model_title,
-                    auto_reason,
+                    result.get("model_used") or model_title,
+                    result.get("switched_reason") or auto_reason,
                     int(usage.get("prompt_tokens") or 0),
                     int(usage.get("completion_tokens") or 0),
                     int(usage.get("total_tokens") or 0),
