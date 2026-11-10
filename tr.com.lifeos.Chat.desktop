@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=LifeOS Chat
+Comment=Cloudflare Workers AI ve Groq sohbet çalışma alanı
+Exec="/home/erkanoz/projeler/CloudFlare Chat/run.sh"
+Icon=/home/erkanoz/projeler/CloudFlare Chat/icon.svg
+Categories=Network;InstantMessaging;
+Terminal=false
